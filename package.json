@@ -1,0 +1,51 @@
+{
+  "name": "antigravity-pi",
+  "version": "0.1.0",
+  "description": "Clean CLI bridge and Antigravity plugin over the Pi Coding Agent SDK",
+  "type": "module",
+  "bin": {
+    "agy-pi": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "plugin.json",
+    "skills",
+    "README.md",
+    "scripts/install.sh"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build",
+    "install:global": "./scripts/install.sh"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.6.0",
+    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mjabbur/antigravity-pi.git"
+  },
+  "homepage": "https://github.com/mjabbur/antigravity-pi#readme",
+  "keywords": [
+    "antigravity",
+    "pi",
+    "cli",
+    "llm",
+    "agent",
+    "plugin"
+  ]
+}
