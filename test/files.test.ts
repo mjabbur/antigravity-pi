@@ -27,7 +27,7 @@ describe("files helpers", () => {
 			const relTarget = join(subDir, "hello.txt");
 			const absTarget = join(tempDir, "utf8.txt");
 			writeFileSync(relTarget, "hello world", "utf8");
-			writeFileSync(absTarget, "olá 🚀", "utf8");
+			writeFileSync(absTarget, "hello — 🚀", "utf8");
 
 			const loaded = await loadAttachedFiles(["nested/hello.txt", absTarget], tempDir);
 			assert.equal(loaded.length, 2);
@@ -39,10 +39,10 @@ describe("files helpers", () => {
 			});
 			assert.deepEqual(loaded[1], {
 				path: absTarget,
-				content: "olá 🚀",
-				bytes: Buffer.byteLength("olá 🚀", "utf8"),
+				content: "hello — 🚀",
+				bytes: Buffer.byteLength("hello — 🚀", "utf8"),
 			});
-			assert.equal(loaded[1].bytes, 9);
+			assert.equal(loaded[1].bytes, 14);
 		});
 
 		it("accepts a file of exactly MAX_ATTACHED_FILE_BYTES (512 KiB)", async () => {

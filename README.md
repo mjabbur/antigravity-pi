@@ -1,31 +1,36 @@
 # agy-pi
 
-`agy-pi` é uma CLI leve e eficiente construída sobre o SDK `@earendil-works/pi-coding-agent`, integrando agentes e modelos externos do Pi (`~/.pi/agent`) diretamente ao ecossistema Antigravity com **zero overhead de tokens MCP fixos** (utilizando progressive disclosure via Antigravity Skill).
+`agy-pi` is a lightweight CLI and Antigravity plugin built on top of the `@earendil-works/pi-coding-agent` SDK. It gives Antigravity direct access to external models connected to Pi (`~/.pi/agent`) with **zero fixed MCP token overhead** (using progressive disclosure via an Antigravity Skill), native Background Task progress on `stderr`, and reactive wakeup notifications when tasks finish.
 
 ---
 
-## Requisitos
+## Requirements
 
 - **Node.js**: `>= 22.19.0`
-- **Autenticação Pi**: Autenticado via `pi` (`/login` ou configuração em `~/.pi/agent/models.json`).
+- **Pi Authentication**: Authenticated via `pi` (`/login` or configured in `~/.pi/agent/models.json`)
 
 ---
 
-## Instalação
+## Installation
 
-Escolha uma das três formas limpas de instalação:
+Choose one of three installation methods:
 
-### a) Instalação rápida via cURL (Recomendado para qualquer máquina):
+### 1. One-line install via curl (recommended for any machine)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mjabbur/antigravity-pi/main/scripts/install.sh | bash
 ```
 
-### b) A partir de um clone local:
+### 2. From a local clone
+
 ```bash
-git clone https://github.com/mjabbur/antigravity-pi.git && cd antigravity-pi && ./scripts/install.sh
+git clone https://github.com/mjabbur/antigravity-pi.git
+cd antigravity-pi
+./scripts/install.sh
 ```
 
-### c) CLI apenas via npm + Plugin Antigravity:
+### 3. CLI via npm + Antigravity plugin separately
+
 ```bash
 npm install -g github:mjabbur/antigravity-pi
 agy plugin install https://github.com/mjabbur/antigravity-pi
@@ -33,37 +38,55 @@ agy plugin install https://github.com/mjabbur/antigravity-pi
 
 ---
 
-## Desinstalação
+## Uninstallation
 
-Se instalou via script (`install.sh`), você pode desinstalar facilmente sem perder suas sessões do Pi ou arquivos de configuração:
+If installed via `scripts/install.sh`, uninstall cleanly without touching your Pi configuration (`~/.pi`) or saved sessions:
+
 ```bash
 ./scripts/install.sh --uninstall
 ```
 
 ---
 
-## Exemplos Práticos de Uso
+## Usage Examples
 
-### Listar Modelos Disponíveis
+### List Available Models
+
 ```bash
 agy-pi models
 agy-pi models openai
+agy-pi models --provider zai
 ```
 
-### Consulta Rápida (`ask`)
-Ideal para code review, opiniões e análise de arquivos específicos:
+### Quick Consultation (`ask`)
+
+Direct LLM call via `streamSimple` (no agent loop or tools). Ideal for second opinions, code reviews, brainstorming, and synthesis:
+
 ```bash
-agy-pi ask --model anthropic/claude-3-5-sonnet --file src/index.ts "Analise este código e aponte possíveis gargalos."
+agy-pi ask --model zai/glm-5.3:high --file src/index.ts -- "Review this file for edge cases and bottlenecks."
 ```
 
-### Execução de Agente (`run`)
-Para exploração de código ou refatoração (modo `readonly` por padrão, ou `coder` para edições):
+### Autonomous Agent Session (`run`)
+
+Full agent session via `createAgentSession` (`--mode readonly` by default, or `--mode coder` to allow edits and shell execution):
+
 ```bash
-agy-pi run --mode readonly --cwd . "Verifique a cobertura de testes e a estrutura do projeto."
+agy-pi run --mode readonly --cwd . -- "Inspect the test coverage and summarize the architecture."
 ```
 
-### Saída em JSON (`--json`)
-Útil para automações e scripts:
+### Multi-Turn Sessions (`--session` and `sessions`)
+
+Resume any previous `ask` or `run` session using the `session=<id>` value printed in the footer:
+
+```bash
+agy-pi sessions
+agy-pi run --session <session-id> -- "Now check the auth middleware as well."
+```
+
+### JSON Output (`--json`)
+
+Structured output for scripts and automation:
+
 ```bash
 agy-pi models --json
 ```
