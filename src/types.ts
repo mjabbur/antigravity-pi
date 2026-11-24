@@ -3,49 +3,190 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 export type { ThinkingLevel };
 
 export type RunMode = "readonly" | "coder";
+export type WorkspaceMode = "inherit" | "worktree";
+export type SubagentStatus = "running" | "idle" | "error" | "killed";
+
+export interface AgentProfile {
+	name: string;
+	description: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	tools?: string[];
+	mode?: RunMode;
+	workspace?: WorkspaceMode;
+	systemPrompt: string;
+	source: "user" | "project";
+	filePath: string;
+}
+
+export interface SubagentWorktreeInfo {
+	repoRoot: string;
+	path: string;
+	branch: string;
+	baseCommit: string;
+}
+
+export interface TokenUsageSummary {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
+	cost: number;
+}
+
+export interface SubagentRecord {
+	id: string;
+	name: string;
+	sessionId: string;
+	sessionFile?: string;
+	agent?: string;
+	model: string;
+	thinkingLevel: ThinkingLevel;
+	mode: RunMode;
+	tools: string[];
+	systemPrompt?: string;
+	cwd: string;
+	effectiveCwd: string;
+	workspace: WorkspaceMode;
+	worktree?: SubagentWorktreeInfo;
+	pid?: number;
+	status: SubagentStatus;
+	turns: number;
+	toolCalls: number;
+	tokens: TokenUsageSummary;
+	cost: number;
+	createdAt: string;
+	updatedAt: string;
+	lastError?: string;
+}
+
+export interface WorktreeDiffResult {
+	subagent: string;
+	workspace: WorkspaceMode;
+	path: string;
+	branch?: string;
+	baseCommit?: string;
+	statusShort: string;
+	diffStat: string;
+	diff: string;
+	hasChanges: boolean;
+	commitsAhead: number;
+}
+
+export interface KillSubagentResult {
+	id: string;
+	stoppedPid?: number;
+	removedWorktree?: string;
+	deletedBranch?: string;
+	preservedBranch?: string;
+	sessionId: string;
+}
+
+export interface ModelsCommand {
+	kind: "models";
+	query?: string;
+	provider?: string;
+	refresh: boolean;
+	json: boolean;
+}
+
+export interface SessionsCommand {
+	kind: "sessions";
+	limit: number;
+	json: boolean;
+}
+
+export interface AgentsCommand {
+	kind: "agents";
+	cwd: string;
+	projectAgents: boolean;
+	json: boolean;
+}
+
+export interface AskCommand {
+	kind: "ask";
+	model?: string;
+	thinking?: ThinkingLevel;
+	system?: string;
+	files: string[];
+	sessionId?: string;
+	noSession: boolean;
+	timeoutSec?: number;
+	json: boolean;
+	quiet: boolean;
+	prompt?: string;
+}
+
+export interface RunCommand {
+	kind: "run";
+	agent?: string;
+	name?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	mode: RunMode;
+	modeExplicit?: boolean;
+	workspace?: WorkspaceMode;
+	tools?: string[];
+	cwd: string;
+	system?: string;
+	files: string[];
+	projectAgents: boolean;
+	sessionId?: string;
+	noSession: boolean;
+	timeoutSec?: number;
+	json: boolean;
+	quiet: boolean;
+	prompt?: string;
+}
+
+export interface SendCommand {
+	kind: "send";
+	target: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	files: string[];
+	timeoutSec?: number;
+	json: boolean;
+	quiet: boolean;
+	prompt?: string;
+}
+
+export interface LsCommand {
+	kind: "ls";
+	status?: SubagentStatus;
+	limit: number;
+	json: boolean;
+}
+
+export interface DiffCommand {
+	kind: "diff";
+	target: string;
+	statOnly: boolean;
+	json: boolean;
+}
+
+export interface KillCommand {
+	kind: "kill";
+	target?: string;
+	all: boolean;
+	force: boolean;
+	deleteBranch: boolean;
+	json: boolean;
+}
 
 export type ParsedCommand =
 	| { kind: "help" }
 	| { kind: "version" }
-	| {
-			kind: "models";
-			query?: string;
-			provider?: string;
-			refresh: boolean;
-			json: boolean;
-	  }
-	| {
-			kind: "sessions";
-			limit: number;
-			json: boolean;
-	  }
-	| {
-			kind: "ask";
-			model?: string;
-			thinking?: ThinkingLevel;
-			system?: string;
-			files: string[];
-			sessionId?: string;
-			noSession: boolean;
-			timeoutSec?: number;
-			json: boolean;
-			quiet: boolean;
-			prompt?: string;
-	  }
-	| {
-			kind: "run";
-			model?: string;
-			thinking?: ThinkingLevel;
-			mode: RunMode;
-			cwd: string;
-			system?: string;
-			sessionId?: string;
-			noSession: boolean;
-			timeoutSec?: number;
-			json: boolean;
-			quiet: boolean;
-			prompt?: string;
-	  };
+	| ModelsCommand
+	| SessionsCommand
+	| AgentsCommand
+	| AskCommand
+	| RunCommand
+	| SendCommand
+	| LsCommand
+	| DiffCommand
+	| KillCommand;
 
 export interface ModelSummary {
 	provider: string;
@@ -57,15 +198,6 @@ export interface ModelSummary {
 	costInput: number;
 	costOutput: number;
 	inputModalities: string[];
-}
-
-export interface TokenUsageSummary {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	total: number;
-	cost: number;
 }
 
 export interface AskResult {
@@ -91,6 +223,8 @@ export interface ToolExecutionSummary {
 
 export interface RunResult {
 	text: string;
+	subagent?: string;
+	agent?: string;
 	sessionId?: string;
 	sessionFile?: string;
 	provider: string;
@@ -98,6 +232,13 @@ export interface RunResult {
 	thinkingLevel: ThinkingLevel;
 	mode: RunMode;
 	cwd: string;
+	workspace?: WorkspaceMode;
+	effectiveCwd?: string;
+	worktree?: {
+		path: string;
+		branch: string;
+		diffStat?: string;
+	};
 	toolsUsed: ToolExecutionSummary[];
 	toolCallsCount: number;
 	turns: number;

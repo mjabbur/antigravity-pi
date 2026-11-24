@@ -2,16 +2,29 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import { describe, it } from "node:test";
 import {
+	formatAgentsText,
 	formatAskText,
 	formatCost,
+	formatDiffText,
 	formatJson,
+	formatKillText,
 	formatModelsText,
 	formatRunText,
 	formatSessionsText,
+	formatSubagentsText,
 	formatTokens,
 } from "../src/format.js";
 import { ProgressLogger, summarizeToolArgs } from "../src/progress.js";
-import type { AskResult, ModelSummary, RunResult, SessionSummary } from "../src/types.js";
+import type {
+	AgentProfile,
+	AskResult,
+	KillSubagentResult,
+	ModelSummary,
+	RunResult,
+	SessionSummary,
+	SubagentRecord,
+	WorktreeDiffResult,
+} from "../src/types.js";
 
 function createCaptureStream(): { stream: Writable; output: () => string } {
 	const chunks: string[] = [];
@@ -193,6 +206,178 @@ describe("format helpers", () => {
 		assert.equal(
 			formatRunText(base),
 			"All tests pass.\n\n[agy-pi] model=anthropic/claude-sonnet mode=readonly tools=3 tokens=12k/800 cost=$0.12",
+		);
+		assert.equal(
+			formatRunText({
+				...base,
+				subagent: "worker-1",
+				agent: "coder",
+				sessionId: "run-10",
+				worktree: {
+					path: "/tmp/wt/worker-1",
+					branch: "agy-pi/worker-1",
+					diffStat: " 1 file changed, 3 insertions(+)",
+				},
+			}),
+			"All tests pass.\n\n[agy-pi] subagent=worker-1 agent=coder session=run-10 model=anthropic/claude-sonnet mode=readonly tools=3 tokens=12k/800 cost=$0.12 branch=agy-pi/worker-1 worktree=/tmp/wt/worker-1\n 1 file changed, 3 insertions(+)",
+		);
+	});
+
+	it("formats agent profiles list in text mode", () => {
+		assert.equal(formatAgentsText([]), "No agent profiles found.");
+
+		const agents: AgentProfile[] = [
+			{
+				name: "reviewer",
+				description: "Line 1\nLine 2",
+				model: "anthropic/claude-sonnet-4",
+				mode: "readonly",
+				workspace: "inherit",
+				tools: ["read", "grep"],
+				systemPrompt: "Review carefully.",
+				source: "user",
+				filePath: "/home/user/.pi/agent/agents/reviewer.md",
+			},
+			{
+				name: "minimal",
+				description: "",
+				systemPrompt: "Minimal prompt.",
+				source: "project",
+				filePath: "/repo/.pi/agents/minimal.md",
+			},
+		];
+
+		assert.equal(
+			formatAgentsText(agents),
+			[
+				'reviewer  source=user  mode=readonly  workspace=inherit  model=anthropic/claude-sonnet-4  tools=read,grep  "Line 1 Line 2"',
+				"minimal  source=project",
+			].join("\n"),
+		);
+	});
+
+	it("formats subagents list in text mode", () => {
+		assert.equal(formatSubagentsText([]), "No subagents found.");
+
+		const records: SubagentRecord[] = [
+			{
+				id: "reviewer-abc123",
+				name: "pr-1",
+				sessionId: "sess-1",
+				agent: "reviewer",
+				model: "anthropic/claude-sonnet-4",
+				thinkingLevel: "medium",
+				mode: "coder",
+				tools: ["read", "edit"],
+				cwd: "/repo",
+				effectiveCwd: "/tmp/wt/pr-1",
+				workspace: "worktree",
+				worktree: {
+					repoRoot: "/repo",
+					path: "/tmp/wt/pr-1",
+					branch: "agy-pi/pr-1",
+					baseCommit: "deadbeef",
+				},
+				status: "idle",
+				turns: 2,
+				toolCalls: 5,
+				tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150, cost: 0.0123 },
+				cost: 0.0123,
+				createdAt: "2026-11-24T10:00:00.000Z",
+				updatedAt: "2026-11-24T10:05:30.000Z",
+			},
+			{
+				id: "worker-2",
+				name: "worker-2",
+				sessionId: "sess-2",
+				model: "openai/gpt-5",
+				thinkingLevel: "low",
+				mode: "readonly",
+				tools: ["read"],
+				cwd: "/repo",
+				effectiveCwd: "/repo",
+				workspace: "inherit",
+				status: "running",
+				turns: 1,
+				toolCalls: 0,
+				tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15, cost: 0 },
+				cost: 0,
+				createdAt: "2026-11-24T11:00:00.000Z",
+				updatedAt: "2026-11-24T11:01:00.000Z",
+			},
+		];
+
+		assert.equal(
+			formatSubagentsText(records),
+			[
+				"reviewer-abc123  name=pr-1  status=idle  agent=reviewer  model=anthropic/claude-sonnet-4  workspace=worktree  branch=agy-pi/pr-1  turns=2  tools=5  cost=$0.01  2026-11-24 10:05:30",
+				"worker-2  status=running  model=openai/gpt-5  workspace=inherit  turns=1  tools=0  cost=$0  2026-11-24 11:01:00",
+			].join("\n"),
+		);
+	});
+
+	it("formats worktree diff results in text mode", () => {
+		const clean: WorktreeDiffResult = {
+			subagent: "worker-1",
+			workspace: "worktree",
+			path: "/tmp/wt/worker-1",
+			branch: "agy-pi/worker-1",
+			statusShort: "",
+			diffStat: "",
+			diff: "",
+			hasChanges: false,
+			commitsAhead: 0,
+		};
+		assert.equal(
+			formatDiffText(clean),
+			"[agy-pi] subagent=worker-1 branch=agy-pi/worker-1 path=/tmp/wt/worker-1 commits=0\nNo changes in worktree.",
+		);
+
+		const dirty: WorktreeDiffResult = {
+			subagent: "worker-1",
+			workspace: "worktree",
+			path: "/tmp/wt/worker-1",
+			branch: "agy-pi/worker-1",
+			statusShort: "M src/a.ts",
+			diffStat: " src/a.ts | 2 +-",
+			diff: "diff --git a/src/a.ts b/src/a.ts",
+			hasChanges: true,
+			commitsAhead: 1,
+		};
+		assert.equal(
+			formatDiffText(dirty),
+			[
+				"[agy-pi] subagent=worker-1 branch=agy-pi/worker-1 path=/tmp/wt/worker-1 commits=1",
+				"M src/a.ts",
+				" src/a.ts | 2 +-",
+				"diff --git a/src/a.ts b/src/a.ts",
+			].join("\n\n"),
+		);
+	});
+
+	it("formats kill results in text mode", () => {
+		assert.equal(formatKillText([]), "No subagents to kill.");
+
+		const results: KillSubagentResult[] = [
+			{
+				id: "worker-1",
+				stoppedPid: 1234,
+				removedWorktree: "/tmp/wt/worker-1",
+				deletedBranch: "agy-pi/worker-1",
+				sessionId: "sess-1",
+			},
+			{
+				id: "worker-2",
+				preservedBranch: "agy-pi/worker-2",
+				sessionId: "sess-2",
+			},
+		];
+		assert.equal(
+			formatKillText(results),
+			[
+				"killed worker-1  pid=1234  removed=/tmp/wt/worker-1  deleted-branch=agy-pi/worker-1  session=sess-1",
+				"killed worker-2  preserved-branch=agy-pi/worker-2  session=sess-2",
+			].join("\n"),
 		);
 	});
 });

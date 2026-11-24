@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Api, clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
@@ -9,10 +9,14 @@ import {
 	resolveCliModel,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { isDirectoryPath } from "./paths.js";
 
 function hasNonEmptyDirectory(dirPath: string): boolean {
+	if (!isDirectoryPath(dirPath)) {
+		return false;
+	}
 	try {
-		return existsSync(dirPath) && readdirSync(dirPath).length > 0;
+		return readdirSync(dirPath).length > 0;
 	} catch {
 		return false;
 	}

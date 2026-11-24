@@ -14,8 +14,12 @@ export async function runSessionsCommand(
 	options: SessionsCommandOptions,
 	deps: SessionsCommandDeps = {},
 ): Promise<SessionSummary[]> {
+	const limit = Math.max(0, options.limit);
+	if (limit === 0) {
+		return [];
+	}
 	return listAgyPiSessions({
-		limit: options.limit,
+		limit,
 		sessionDir: deps.sessionDir,
 	});
 }

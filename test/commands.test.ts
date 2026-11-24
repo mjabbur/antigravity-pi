@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -14,13 +15,21 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { type ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { runAgentsCommand } from "../src/commands/agents.js";
 import { runAskCommand } from "../src/commands/ask.js";
+import { runDiffCommand } from "../src/commands/diff.js";
+import { runKillCommand } from "../src/commands/kill.js";
+import { runLsCommand } from "../src/commands/ls.js";
 import { runModelsCommand } from "../src/commands/models.js";
+import { runSendCommand } from "../src/commands/send.js";
 import { runSessionsCommand } from "../src/commands/sessions.js";
 import { formatJson, formatModelsText } from "../src/format.js";
 import { ProgressLogger } from "../src/progress.js";
 import { CliAbortError } from "../src/runtime.js";
 import { openOrCreateSession } from "../src/sessions.js";
+import { listSubagents, saveSubagentRecord } from "../src/subagents.js";
+import type { SubagentRecord } from "../src/types.js";
+import { createWorktree } from "../src/worktree.js";
 
 function makeModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
 	return {
@@ -399,6 +408,372 @@ describe("commands", () => {
 					err instanceof CliAbortError &&
 					err.exitCode === 130 &&
 					/Stream aborted by upstream/.test(err.message),
+			);
+		});
+	});
+
+	describe("runAgentsCommand", () => {
+		it("discovers user agents and optionally includes project agents", async () => {
+			const agentDir = join(tempRoot, "cmd-agents-dir");
+			const projectDir = join(tempRoot, "cmd-agents-proj");
+			mkdirSync(join(agentDir, "agents"), { recursive: true });
+			mkdirSync(join(projectDir, ".pi", "agents"), { recursive: true });
+
+			writeFileSync(
+				join(agentDir, "agents", "user-agent.md"),
+				["---", "name: user-agent", "description: User profile", "---", "Prompt."].join("\n"),
+				"utf8",
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "agents", "proj-agent.md"),
+				["---", "name: proj-agent", "description: Project profile", "---", "Prompt."].join("\n"),
+				"utf8",
+			);
+
+			const userOnly = await runAgentsCommand(
+				{ cwd: projectDir, projectAgents: false, json: false },
+				{ agentDir },
+			);
+			assert.deepEqual(
+				userOnly.map((a) => a.name),
+				["user-agent"],
+			);
+
+			const withProject = await runAgentsCommand(
+				{ cwd: projectDir, projectAgents: true, json: false },
+				{ agentDir },
+			);
+			assert.deepEqual(
+				withProject.map((a) => a.name),
+				["proj-agent", "user-agent"],
+			);
+		});
+	});
+
+	describe("runLsCommand", () => {
+		it("lists subagents filtered by status and limit", async () => {
+			const subagentsDir = join(tempRoot, "cmd-ls-subagents");
+
+			const makeSubagent = (overrides: Partial<SubagentRecord>): SubagentRecord => ({
+				id: "sub-1",
+				name: "sub-1",
+				sessionId: "sess-1",
+				model: "anthropic/claude-sonnet-4",
+				thinkingLevel: "medium",
+				mode: "readonly",
+				tools: ["read"],
+				cwd: tempRoot,
+				effectiveCwd: tempRoot,
+				workspace: "inherit",
+				status: "idle",
+				turns: 1,
+				toolCalls: 0,
+				tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+				cost: 0,
+				createdAt: "2026-11-24T10:00:00.000Z",
+				updatedAt: "2026-11-24T10:00:00.000Z",
+				...overrides,
+			});
+
+			saveSubagentRecord(
+				makeSubagent({ id: "a", name: "a", status: "idle", updatedAt: "2026-11-24T10:00:00.000Z" }),
+				subagentsDir,
+			);
+			saveSubagentRecord(
+				makeSubagent({ id: "b", name: "b", status: "error", updatedAt: "2026-11-24T11:00:00.000Z" }),
+				subagentsDir,
+			);
+			saveSubagentRecord(
+				makeSubagent({ id: "c", name: "c", status: "idle", updatedAt: "2026-11-24T12:00:00.000Z" }),
+				subagentsDir,
+			);
+
+			const all = await runLsCommand({ limit: 10, json: false }, { subagentsDir });
+			assert.deepEqual(
+				all.map((r) => r.id),
+				["c", "b", "a"],
+			);
+
+			const idleLimited = await runLsCommand(
+				{ status: "idle", limit: 1, json: false },
+				{ subagentsDir },
+			);
+			assert.deepEqual(
+				idleLimited.map((r) => r.id),
+				["c"],
+			);
+		});
+	});
+
+	describe("runDiffCommand", () => {
+		it("throws a clear error when subagent uses inherit workspace", async () => {
+			const subagentsDir = join(tempRoot, "cmd-diff-inherit");
+			saveSubagentRecord(
+				{
+					id: "inherit-worker",
+					name: "inherit-worker",
+					sessionId: "sess-inherit",
+					model: "anthropic/claude-sonnet-4",
+					thinkingLevel: "medium",
+					mode: "readonly",
+					tools: ["read"],
+					cwd: tempRoot,
+					effectiveCwd: tempRoot,
+					workspace: "inherit",
+					status: "idle",
+					turns: 1,
+					toolCalls: 0,
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+					cost: 0,
+					createdAt: "2026-11-24T10:00:00.000Z",
+					updatedAt: "2026-11-24T10:00:00.000Z",
+				},
+				subagentsDir,
+			);
+
+			await assert.rejects(
+				() => runDiffCommand({ target: "inherit-worker", statOnly: false, json: false }, { subagentsDir }),
+				/uses workspace "inherit" and has no git worktree to diff/,
+			);
+		});
+
+		it("returns worktree diff and respects statOnly for worktree subagents", async () => {
+			const subagentsDir = join(tempRoot, "cmd-diff-worktree-subs");
+			const repoDir = join(tempRoot, "cmd-diff-repo");
+			const worktreesDir = join(tempRoot, "cmd-diff-worktrees");
+
+			mkdirSync(repoDir, { recursive: true });
+			execFileSync("git", ["-C", repoDir, "init"]);
+			execFileSync("git", ["-C", repoDir, "config", "user.name", "Test User"]);
+			execFileSync("git", ["-C", repoDir, "config", "user.email", "test@example.com"]);
+			writeFileSync(join(repoDir, "file.txt"), "one\n", "utf8");
+			execFileSync("git", ["-C", repoDir, "add", "."]);
+			execFileSync("git", ["-C", repoDir, "commit", "-m", "init"]);
+
+			const created = await createWorktree({ cwd: repoDir, slug: "diff-sub", worktreesDir });
+			writeFileSync(join(created.worktree.path, "file.txt"), "two\n", "utf8");
+
+			saveSubagentRecord(
+				{
+					id: "wt-worker",
+					name: "wt-worker",
+					sessionId: "sess-wt",
+					model: "anthropic/claude-sonnet-4",
+					thinkingLevel: "medium",
+					mode: "coder",
+					tools: ["read", "edit"],
+					cwd: repoDir,
+					effectiveCwd: created.effectiveCwd,
+					workspace: "worktree",
+					worktree: created.worktree,
+					status: "idle",
+					turns: 1,
+					toolCalls: 1,
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+					cost: 0,
+					createdAt: "2026-11-24T10:00:00.000Z",
+					updatedAt: "2026-11-24T10:00:00.000Z",
+				},
+				subagentsDir,
+			);
+
+			const full = await runDiffCommand(
+				{ target: "wt-worker", statOnly: false, json: false },
+				{ subagentsDir },
+			);
+			assert.equal(full.subagent, "wt-worker");
+			assert.equal(full.workspace, "worktree");
+			assert.equal(full.hasChanges, true);
+			assert.match(full.diffStat, /file\.txt/);
+			assert.match(full.diff, /\+two/);
+
+			const statOnly = await runDiffCommand(
+				{ target: "wt-worker", statOnly: true, json: false },
+				{ subagentsDir },
+			);
+			assert.equal(statOnly.hasChanges, true);
+			assert.match(statOnly.diffStat, /file\.txt/);
+			assert.equal(statOnly.diff, "");
+		});
+	});
+
+	describe("runKillCommand", () => {
+		it("removes single subagent record and preserves its JSONL session file", async () => {
+			const subagentsDir = join(tempRoot, "cmd-kill-single-subs");
+			const sessionDir = join(tempRoot, "cmd-kill-single-sessions");
+			const cwd = join(tempRoot, "cmd-kill-single-cwd");
+			mkdirSync(cwd, { recursive: true });
+
+			const session = openOrCreateSession({ cwd, noSession: false, sessionDir });
+			session.appendMessage({ role: "user", content: "Keep this session", timestamp: 1_700_000_000_000 });
+			const sessionFile = session.getSessionFile();
+			assert.ok(sessionFile && existsSync(sessionFile));
+
+			saveSubagentRecord(
+				{
+					id: "kill-one",
+					name: "kill-one",
+					sessionId: session.getSessionId(),
+					sessionFile,
+					model: "anthropic/claude-sonnet-4",
+					thinkingLevel: "medium",
+					mode: "readonly",
+					tools: ["read"],
+					cwd,
+					effectiveCwd: cwd,
+					workspace: "inherit",
+					status: "idle",
+					turns: 1,
+					toolCalls: 0,
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+					cost: 0,
+					createdAt: "2026-11-24T10:00:00.000Z",
+					updatedAt: "2026-11-24T10:00:00.000Z",
+				},
+				subagentsDir,
+			);
+
+			const killed = await runKillCommand(
+				{ target: "kill-one", all: false, force: false, deleteBranch: false, json: false },
+				{ subagentsDir },
+			);
+			assert.equal(killed.length, 1);
+			assert.equal(killed[0].id, "kill-one");
+			assert.equal(killed[0].sessionId, session.getSessionId());
+			assert.deepEqual(listSubagents({ subagentsDir }), []);
+			assert.equal(existsSync(sessionFile), true);
+		});
+
+		it("kills all subagents with --all and preserves all JSONL session files", async () => {
+			const subagentsDir = join(tempRoot, "cmd-kill-all-subs");
+			const sessionDir = join(tempRoot, "cmd-kill-all-sessions");
+			const cwd = join(tempRoot, "cmd-kill-all-cwd");
+			mkdirSync(cwd, { recursive: true });
+
+			const sessionFiles: string[] = [];
+			for (const id of ["sub-a", "sub-b"]) {
+				const session = openOrCreateSession({ cwd, noSession: false, sessionDir });
+				session.appendMessage({ role: "user", content: `Prompt for ${id}`, timestamp: 1_700_000_000_000 });
+				const file = session.getSessionFile();
+				assert.ok(file && existsSync(file));
+				sessionFiles.push(file);
+
+				saveSubagentRecord(
+					{
+						id,
+						name: id,
+						sessionId: session.getSessionId(),
+						sessionFile: file,
+						model: "anthropic/claude-sonnet-4",
+						thinkingLevel: "medium",
+						mode: "readonly",
+						tools: ["read"],
+						cwd,
+						effectiveCwd: cwd,
+						workspace: "inherit",
+						status: "idle",
+						turns: 1,
+						toolCalls: 0,
+						tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+						cost: 0,
+						createdAt: "2026-11-24T10:00:00.000Z",
+						updatedAt: "2026-11-24T10:00:00.000Z",
+					},
+					subagentsDir,
+				);
+			}
+
+			const results = await runKillCommand(
+				{ all: true, force: false, deleteBranch: false, json: false },
+				{ subagentsDir },
+			);
+			assert.equal(results.length, 2);
+			assert.deepEqual(listSubagents({ subagentsDir }), []);
+			for (const file of sessionFiles) {
+				assert.equal(existsSync(file), true);
+			}
+		});
+	});
+
+	describe("runSendCommand", () => {
+		it("rejects live running and killed subagents", async () => {
+			const subagentsDir = join(tempRoot, "cmd-send-reject-subs");
+
+			saveSubagentRecord(
+				{
+					id: "live-worker",
+					name: "live-worker",
+					sessionId: "sess-live",
+					model: "anthropic/claude-sonnet-4",
+					thinkingLevel: "medium",
+					mode: "readonly",
+					tools: ["read"],
+					cwd: tempRoot,
+					effectiveCwd: tempRoot,
+					workspace: "inherit",
+					pid: process.pid,
+					status: "running",
+					turns: 1,
+					toolCalls: 0,
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+					cost: 0,
+					createdAt: "2026-11-24T10:00:00.000Z",
+					updatedAt: "2026-11-24T10:00:00.000Z",
+				},
+				subagentsDir,
+			);
+
+			saveSubagentRecord(
+				{
+					id: "killed-worker",
+					name: "killed-worker",
+					sessionId: "sess-killed",
+					model: "anthropic/claude-sonnet-4",
+					thinkingLevel: "medium",
+					mode: "readonly",
+					tools: ["read"],
+					cwd: tempRoot,
+					effectiveCwd: tempRoot,
+					workspace: "inherit",
+					status: "killed",
+					turns: 1,
+					toolCalls: 0,
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+					cost: 0,
+					createdAt: "2026-11-24T10:00:00.000Z",
+					updatedAt: "2026-11-24T10:00:00.000Z",
+				},
+				subagentsDir,
+			);
+
+			await assert.rejects(
+				() =>
+					runSendCommand(
+						{
+							target: "live-worker",
+							files: [],
+							json: false,
+							quiet: true,
+							prompt: "Continue",
+						},
+						{ subagentsDir },
+					),
+				/is currently running/,
+			);
+
+			await assert.rejects(
+				() =>
+					runSendCommand(
+						{
+							target: "killed-worker",
+							files: [],
+							json: false,
+							quiet: true,
+							prompt: "Continue",
+						},
+						{ subagentsDir },
+					),
+				/has been killed/,
 			);
 		});
 	});

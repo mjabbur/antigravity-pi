@@ -1,15 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import os from "node:os";
 import { join, resolve } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { getAgyPiCacheSubdir } from "./paths.js";
 import type { SessionSummary } from "./types.js";
 
 export function getDefaultAgyPiSessionDir(): string {
-	if (process.env.AGY_PI_SESSION_DIR) {
-		return resolve(process.env.AGY_PI_SESSION_DIR);
-	}
-	const cacheHome = process.env.XDG_CACHE_HOME || join(os.homedir(), ".cache");
-	return join(cacheHome, "agy-pi", "sessions");
+	return getAgyPiCacheSubdir("AGY_PI_SESSION_DIR", "sessions");
 }
 
 function findSessionFileByIdInDir(sessionDir: string, sessionId: string): string | undefined {

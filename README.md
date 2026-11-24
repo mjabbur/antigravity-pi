@@ -1,6 +1,6 @@
 # agy-pi
 
-`agy-pi` is a lightweight CLI and Antigravity plugin built on top of the `@earendil-works/pi-coding-agent` SDK. It gives Antigravity direct access to external models connected to Pi (`~/.pi/agent`) with **zero fixed MCP token overhead** (using progressive disclosure via an Antigravity Skill), native Background Task progress on `stderr`, and reactive wakeup notifications when tasks finish.
+`agy-pi` is a lightweight CLI and Antigravity plugin built on top of the `@earendil-works/pi-coding-agent` SDK. It gives Antigravity direct access to external models connected to Pi (`~/.pi/agent`) with **zero fixed MCP token overhead** (using progressive disclosure via an Antigravity Skill), native Background Task progress on `stderr`, reactive wakeup notifications when tasks finish, and full subagent parity.
 
 ---
 
@@ -50,43 +50,63 @@ If installed via `scripts/install.sh`, uninstall cleanly without touching your P
 
 ## Usage Examples
 
-### List Available Models
+### List Available Models & Agent Profiles
 
 ```bash
 agy-pi models
-agy-pi models openai
-agy-pi models --provider zai
+agy-pi models anthropic
+agy-pi agents
+agy-pi agents --project-agents
+```
+
+#### Declarative Agent Profiles
+Create reusable agent profiles in `~/.pi/agent/agents/*.md` (or project-level):
+```markdown
+---
+name: code-reviewer
+description: Expert security and code quality reviewer
+model: zai/glm-5.3:high
+tools: [read, grep, find, ls]
+workspace: inherit
+---
+
+You are an expert senior code reviewer. Focus on robustness, security vulnerabilities, and edge cases.
 ```
 
 ### Quick Consultation (`ask`)
 
-Direct LLM call via `streamSimple` (no agent loop or tools). Ideal for second opinions, code reviews, brainstorming, and synthesis:
+Direct LLM call via `streamSimple` (no agent loop or tools):
 
 ```bash
 agy-pi ask --model zai/glm-5.3:high --file src/index.ts -- "Review this file for edge cases and bottlenecks."
 ```
 
-### Autonomous Agent Session (`run`)
+### Subagent Lifecycle & Execution (`run`, `send`, `ls`, `diff`, `kill`)
 
-Full agent session via `createAgentSession` (`--mode readonly` by default, or `--mode coder` to allow edits and shell execution):
+Run autonomous agent sessions with full background task parity, isolated git worktrees, and persistent state:
 
-```bash
-agy-pi run --mode readonly --cwd . -- "Inspect the test coverage and summarize the architecture."
-```
+1. **Start an agent**:
+   ```bash
+   agy-pi run --name reviewer --agent code-reviewer --workspace worktree -- "Audit auth/jwt.ts for vulnerabilities."
+   ```
+2. **List active sessions**:
+   ```bash
+   agy-pi ls
+   ```
+3. **Inspect changes**:
+   ```bash
+   agy-pi diff reviewer
+   ```
+4. **Send follow-up instructions**:
+   ```bash
+   agy-pi send reviewer -- "Also check the refresh token expiration logic."
+   ```
+5. **Terminate and cleanup**:
+   ```bash
+   agy-pi kill reviewer --delete-branch
+   ```
 
-### Multi-Turn Sessions (`--session` and `sessions`)
+### Using `agy-pi` with `/swarm`
 
-Resume any previous `ask` or `run` session using the `session=<id>` value printed in the footer:
-
-```bash
-agy-pi sessions
-agy-pi run --session <session-id> -- "Now check the auth middleware as well."
-```
-
-### JSON Output (`--json`)
-
-Structured output for scripts and automation:
-
-```bash
-agy-pi models --json
-```
+- Inside `/swarm` workers that already have `workspace: "share"`, use `--workspace inherit` so each subagent operates within the shared workspace without git conflicts.
+- Alternatively, fan out parallel independent writers using `agy-pi run --workspace worktree` directly from the coordinator.

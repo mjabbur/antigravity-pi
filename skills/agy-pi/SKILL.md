@@ -1,50 +1,47 @@
 ---
 name: agy-pi
-description: Use agy-pi CLI to consult or delegate work to external LLM models connected to Pi (~/.pi/agent) with zero fixed MCP token overhead.
+description: Use agy-pi CLI to consult or delegate work to external LLM models connected to Pi (~/.pi/agent) with zero fixed MCP token overhead and native subagent parity.
 ---
 
 # agy-pi Skill
 
-Use `agy-pi` to consult, review, or delegate work to external LLM models (Claude, GPT, DeepSeek, Gemini, etc.) connected to Pi (`~/.pi/agent`).
+Treat `agy-pi` subagents transparently just like native Antigravity subagents.
 
 ## Core Rules
 
-1. **Standalone Sandbox Bypass**: Always run `agy-pi` with `BypassSandbox: true` as a pure, standalone command (no shell chaining like `&&`, `;`, variables `$VAR`, or command substitutions `$(...)`) so user terminal approval auto-allows it.
-2. **Model Discovery**: Run `agy-pi models [filter]` synchronously (`WaitMsBeforeAsync: 5000`) to find available model IDs.
-3. **Background Tasks**: Run `agy-pi ask` and `agy-pi run` with `WaitMsBeforeAsync: 500` (backgrounded) so they run as native Antigravity Background Tasks with live progress and reactive wakeup on completion. **Never poll or sleep.**
+1. **Standalone Sandbox Bypass**: Always run `agy-pi` with `BypassSandbox: true` as a pure, standalone command (no `&&`, `;`, `$VAR`, `$(...)`) so user terminal approval auto-allows it.
+2. **Discovery & Management (Synchronous)**: Run with `WaitMsBeforeAsync: 5000` for discovery and management: `agy-pi models [filter]`, `agy-pi agents`, `agy-pi ls`, `agy-pi diff <name>`, `agy-pi kill <name|--all>`.
+3. **Execution & Interaction (Background)**: Run with `WaitMsBeforeAsync: 500` for execution: `agy-pi ask`, `agy-pi run`, `agy-pi send` — runs as native Antigravity Background Tasks with live stderr progress and reactive wakeup on completion. Never poll or sleep. Fan out multiple parallel calls in the same turn when useful.
 
 ---
 
 ## Commands & Usage
 
-### 1. Discover Models
-```bash
-agy-pi models
-agy-pi models anthropic
-```
+### 1. Discovery & Agents
+- `agy-pi models [filter]` — list available models
+- `agy-pi agents [--project-agents]` — list declarative agent profiles (`~/.pi/agent/agents/*.md`)
 
-### 2. Quick Consult (`agy-pi ask`)
-Fast direct LLM call (no agent loop/tools). Ideal for second opinions, code reviews, brainstorming, or synthesis.
-- `--model provider/id[:thinking]` (e.g., `--model zai/glm-5.3:high`)
-- `--file <path>` (repeatable, attaches files as context)
-- `--session <id>` (resume/continue a session)
-
+### 2. Direct Query (`agy-pi ask`)
+Fast direct LLM call (no tools):
 ```bash
-agy-pi ask --model zai/glm-5.3:high --file src/index.ts -- "Review this file for security issues."
+agy-pi ask --model provider/id[:thinking] --file <path>... --session <id> -- "<prompt>"
 ```
 
 ### 3. Agent Execution (`agy-pi run`)
-Full autonomous agent session for exploring codebases, running tests, or editing files.
-- `--mode readonly` (default: `read,grep,find,ls`) vs `--mode coder` (can write/edit/run bash)
-- `--cwd <dir>`
-- `--session <id>`
-
-> [!WARNING]
-> Never run two `coder` mode agents in the same working tree simultaneously.
-
+Full autonomous subagent session:
 ```bash
-agy-pi run --mode readonly --cwd /path/to/repo -- "Analyze the architecture of src/core.ts."
+agy-pi run [--name <alias>] [--agent <profile>] [--model <m>] [--mode readonly|coder] [--tools <list>] [--workspace inherit|worktree] [--cwd <dir>] [--file <path>]... -- "<task>"
+```
+- Default workspace is `inherit` (always keep `inherit` inside a `/swarm` worker that has `workspace: "share"`).
+- Use `--workspace worktree` when running parallel writers/coders directly from the same repo so each subagent gets an isolated git worktree & branch (`agy-pi/<name>`).
+
+### 4. Session Continuation (`agy-pi send`)
+Continue an active session (equivalent to `send_message`):
+```bash
+agy-pi send <name|id> [--file <path>]... -- "<follow-up>"
 ```
 
-### 4. Multi-Turn Sessions
-Check the `[agy-pi] session=<id>` footer in output, then pass `--session <id>` for follow-ups. List recent sessions with `agy-pi sessions`.
+### 5. Lifecycle Management
+- `agy-pi ls` — list active managed subagent sessions
+- `agy-pi diff <name|id>` — show git diff for a session's workspace
+- `agy-pi kill <name|id|--all>` [--force] [--delete-branch] — terminate sessions and clean up worktrees
