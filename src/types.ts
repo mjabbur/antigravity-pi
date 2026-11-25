@@ -2,6 +2,21 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type { ThinkingLevel };
 
+export const KNOWN_BUILTIN_TOOLS = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"edit",
+	"write",
+	"bash",
+	"powershell",
+] as const;
+
+export const READONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+
+export type KnownBuiltinTool = (typeof KNOWN_BUILTIN_TOOLS)[number];
+
 export type RunMode = "readonly" | "coder";
 export type WorkspaceMode = "inherit" | "worktree";
 export type SubagentStatus = "running" | "idle" | "error" | "killed";
@@ -51,6 +66,7 @@ export interface SubagentRecord {
 	workspace: WorkspaceMode;
 	worktree?: SubagentWorktreeInfo;
 	pid?: number;
+	pidStartTime?: string;
 	status: SubagentStatus;
 	turns: number;
 	toolCalls: number;
@@ -59,6 +75,26 @@ export interface SubagentRecord {
 	createdAt: string;
 	updatedAt: string;
 	lastError?: string;
+}
+
+export interface SubagentSummary {
+	id: string;
+	name: string;
+	status: SubagentStatus;
+	agent?: string;
+	model: string;
+	thinkingLevel: ThinkingLevel;
+	mode: RunMode;
+	workspace: WorkspaceMode;
+	cwd: string;
+	effectiveCwd: string;
+	worktree?: SubagentWorktreeInfo;
+	turns: number;
+	toolCalls: number;
+	tokens: TokenUsageSummary;
+	cost: number;
+	createdAt: string;
+	updatedAt: string;
 }
 
 export interface WorktreeDiffResult {

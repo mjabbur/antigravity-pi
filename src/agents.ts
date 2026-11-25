@@ -1,8 +1,20 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { getToolValidationError } from "./args.js";
 import { isDirectoryPath } from "./paths.js";
-import type { AgentProfile, RunMode, ThinkingLevel, WorkspaceMode } from "./types.js";
+import {
+	type AgentProfile,
+	KNOWN_BUILTIN_TOOLS,
+	READONLY_TOOLS,
+	type RunMode,
+	type ThinkingLevel,
+	type WorkspaceMode,
+} from "./types.js";
+
+export { KNOWN_BUILTIN_TOOLS, READONLY_TOOLS };
+
+export const MAX_AGENT_PROFILE_BYTES = 128 * 1024;
 
 const VALID_THINKING_SET = new Set<string>([
 	"off",
@@ -25,6 +37,7 @@ export interface DiscoverAgentsOptions {
 
 /**
  * Parses a tool list from either a comma-separated string or an array of strings.
+ * Rejects modifiers (+/-/wildcards) and unknown tool names.
  */
 export function parseToolList(value: unknown): string[] | undefined {
 	if (value === undefined || value === null) return undefined;
@@ -42,7 +55,12 @@ export function parseToolList(value: unknown): string[] | undefined {
 	const seen = new Set<string>();
 	for (const item of rawItems) {
 		const trimmed = item.trim();
-		if (trimmed.length > 0 && !seen.has(trimmed)) {
+		if (trimmed.length === 0) continue;
+		const toolError = getToolValidationError(trimmed);
+		if (toolError) {
+			throw new Error(toolError);
+		}
+		if (!seen.has(trimmed)) {
 			seen.add(trimmed);
 			result.push(trimmed);
 		}
@@ -51,56 +69,102 @@ export function parseToolList(value: unknown): string[] | undefined {
 	return result.length > 0 ? result : undefined;
 }
 
-function isRegularFile(filePath: string): boolean {
+function isNonSymlinkEntry(
+	targetPath: string,
+	kind: "file" | "dir",
+	maxBytes?: number,
+): boolean {
 	try {
-		return statSync(filePath).isFile();
+		const stat = lstatSync(targetPath);
+		if (stat.isSymbolicLink()) return false;
+		if (kind === "dir") return stat.isDirectory();
+		return stat.isFile() && (maxBytes === undefined || stat.size <= maxBytes);
 	} catch {
 		return false;
 	}
 }
 
-function parseProfileFile(filePath: string, source: "user" | "project"): AgentProfile | undefined {
+function hasGitMarker(dirPath: string): boolean {
+	try {
+		const stat = lstatSync(join(dirPath, ".git"));
+		return !stat.isSymbolicLink() && (stat.isDirectory() || stat.isFile());
+	} catch {
+		return false;
+	}
+}
+
+function findGitRoot(startCwd: string): string | undefined {
+	let current = resolve(startCwd);
+	while (true) {
+		if (hasGitMarker(current)) {
+			return current;
+		}
+		const parent = dirname(current);
+		if (parent === current) {
+			return undefined;
+		}
+		current = parent;
+	}
+}
+
+function readParsedProfile(
+	filePath: string,
+): { frontmatter: Record<string, unknown>; body: string } | undefined {
+	if (!isNonSymlinkEntry(filePath, "file", MAX_AGENT_PROFILE_BYTES)) {
+		return undefined;
+	}
 	let raw: string;
 	try {
 		raw = readFileSync(filePath, "utf8");
 	} catch {
 		return undefined;
 	}
-
-	let parsed: { frontmatter: Record<string, unknown>; body: string };
+	if (Buffer.byteLength(raw, "utf8") > MAX_AGENT_PROFILE_BYTES) {
+		return undefined;
+	}
 	try {
-		parsed = parseFrontmatter<Record<string, unknown>>(raw);
+		const parsed = parseFrontmatter<Record<string, unknown>>(raw);
+		const fm = parsed.frontmatter;
+		if (!fm || typeof fm !== "object" || Array.isArray(fm)) {
+			return undefined;
+		}
+		return parsed;
+	} catch {
+		return undefined;
+	}
+}
+
+function parseTrimmedString<T extends string = string>(
+	value: unknown,
+	allowed?: Set<string>,
+): T | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
+	if (allowed && !allowed.has(trimmed)) return undefined;
+	return trimmed as T;
+}
+
+function parseProfileFile(filePath: string, source: "user" | "project"): AgentProfile | undefined {
+	const parsed = readParsedProfile(filePath);
+	if (!parsed) return undefined;
+
+	const fm = parsed.frontmatter;
+	const name = parseTrimmedString(fm.name);
+	if (!name) return undefined;
+
+	let tools: string[] | undefined;
+	try {
+		tools = parseToolList(fm.tools);
 	} catch {
 		return undefined;
 	}
 
-	const fm = parsed.frontmatter;
-	if (!fm || typeof fm !== "object" || Array.isArray(fm)) {
-		return undefined;
-	}
-
-	const rawName = fm.name;
-	if (typeof rawName !== "string" || rawName.trim().length === 0) {
-		return undefined;
-	}
-	const name = rawName.trim();
-
 	const description = typeof fm.description === "string" ? fm.description.trim() : "";
-	const model =
-		typeof fm.model === "string" && fm.model.trim().length > 0 ? fm.model.trim() : undefined;
-	const thinking =
-		typeof fm.thinking === "string" && VALID_THINKING_SET.has(fm.thinking.trim())
-			? (fm.thinking.trim() as ThinkingLevel)
-			: undefined;
-	const mode =
-		typeof fm.mode === "string" && VALID_RUN_MODE_SET.has(fm.mode.trim())
-			? (fm.mode.trim() as RunMode)
-			: undefined;
-	const workspace =
-		typeof fm.workspace === "string" && VALID_WORKSPACE_SET.has(fm.workspace.trim())
-			? (fm.workspace.trim() as WorkspaceMode)
-			: undefined;
-	const tools = parseToolList(fm.tools);
+	const model = parseTrimmedString(fm.model);
+	const thinking = parseTrimmedString<ThinkingLevel>(fm.thinking, VALID_THINKING_SET);
+	const mode = parseTrimmedString<RunMode>(fm.mode, VALID_RUN_MODE_SET);
+	const workspace = parseTrimmedString<WorkspaceMode>(fm.workspace, VALID_WORKSPACE_SET);
 
 	return {
 		name,
@@ -117,7 +181,9 @@ function parseProfileFile(filePath: string, source: "user" | "project"): AgentPr
 }
 
 function loadAgentsFromDir(dirPath: string, source: "user" | "project"): AgentProfile[] {
-	if (!isDirectoryPath(dirPath)) {
+	const dirExists =
+		source === "project" ? isNonSymlinkEntry(dirPath, "dir") : isDirectoryPath(dirPath);
+	if (!dirExists) {
 		return [];
 	}
 
@@ -132,7 +198,6 @@ function loadAgentsFromDir(dirPath: string, source: "user" | "project"): AgentPr
 	for (const entry of entries) {
 		if (!entry.endsWith(".md")) continue;
 		const fullPath = join(dirPath, entry);
-		if (!isRegularFile(fullPath)) continue;
 		const profile = parseProfileFile(fullPath, source);
 		if (profile) {
 			profiles.push(profile);
@@ -142,17 +207,44 @@ function loadAgentsFromDir(dirPath: string, source: "user" | "project"): AgentPr
 }
 
 function findNearestProjectAgentsDir(startCwd: string): string | undefined {
-	let current = resolve(startCwd);
+	const resolvedStart = resolve(startCwd);
+	const gitRoot = findGitRoot(resolvedStart);
+	if (!gitRoot) {
+		const directCandidate = join(resolvedStart, ".pi", "agents");
+		return isNonSymlinkEntry(directCandidate, "dir") ? directCandidate : undefined;
+	}
+
+	let current = resolvedStart;
 	while (true) {
 		const candidate = join(current, ".pi", "agents");
-		if (isDirectoryPath(candidate)) {
+		if (isNonSymlinkEntry(candidate, "dir")) {
 			return candidate;
+		}
+		if (current === gitRoot) {
+			return undefined;
 		}
 		const parent = dirname(current);
 		if (parent === current) {
 			return undefined;
 		}
 		current = parent;
+	}
+}
+
+function mergeProjectProfiles(
+	byName: Map<string, AgentProfile>,
+	cwd: string,
+	userAgentsDir: string,
+): void {
+	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
+	if (!projectAgentsDir || resolve(projectAgentsDir) === resolve(userAgentsDir)) {
+		return;
+	}
+	for (const profile of loadAgentsFromDir(projectAgentsDir, "project")) {
+		const targetName = byName.has(profile.name) ? `project:${profile.name}` : profile.name;
+		if (!byName.has(targetName)) {
+			byName.set(targetName, targetName === profile.name ? profile : { ...profile, name: targetName });
+		}
 	}
 }
 
@@ -169,12 +261,7 @@ export function discoverAgents(options: DiscoverAgentsOptions = {}): AgentProfil
 	}
 
 	if (options.includeProjectAgents) {
-		const projectAgentsDir = findNearestProjectAgentsDir(options.cwd ?? process.cwd());
-		if (projectAgentsDir && resolve(projectAgentsDir) !== resolve(userAgentsDir)) {
-			for (const profile of loadAgentsFromDir(projectAgentsDir, "project")) {
-				byName.set(profile.name, profile);
-			}
-		}
+		mergeProjectProfiles(byName, options.cwd ?? process.cwd(), userAgentsDir);
 	}
 
 	return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));

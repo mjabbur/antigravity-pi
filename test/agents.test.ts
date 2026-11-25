@@ -166,6 +166,7 @@ describe("agents", () => {
 			const repoRoot = join(rootTemp, "repo-with-agents");
 			const projectAgentsDir = join(repoRoot, ".pi", "agents");
 			const nestedCwd = join(repoRoot, "packages", "web", "src");
+			mkdirSync(join(repoRoot, ".git"), { recursive: true });
 			mkdirSync(projectAgentsDir, { recursive: true });
 			mkdirSync(nestedCwd, { recursive: true });
 
@@ -202,7 +203,7 @@ describe("agents", () => {
 				["global-only:user", "scout:user"],
 			);
 
-			// With includeProjectAgents: true -> walks up from nestedCwd and overrides scout
+			// With includeProjectAgents: true -> walks up from nestedCwd, keeps user scout, and namespaces project:scout
 			const withProject = discoverAgents({
 				agentDir,
 				cwd: nestedCwd,
@@ -210,13 +211,20 @@ describe("agents", () => {
 			});
 			assert.deepEqual(
 				withProject.map((p) => `${p.name}:${p.source}`),
-				["global-only:user", "local-helper:project", "scout:project"],
+				["global-only:user", "local-helper:project", "project:scout:project", "scout:user"],
 			);
-			const overriddenScout = withProject.find((p) => p.name === "scout");
-			assert.equal(overriddenScout?.description, "Project scout override");
-			assert.equal(overriddenScout?.mode, "coder");
-			assert.equal(overriddenScout?.workspace, "worktree");
-			assert.equal(overriddenScout?.systemPrompt, "Project scout prompt.");
+			const userScout = withProject.find((p) => p.name === "scout");
+			assert.equal(userScout?.source, "user");
+			assert.equal(userScout?.description, "User scout");
+			assert.equal(userScout?.mode, "readonly");
+			assert.equal(userScout?.systemPrompt, "User scout prompt.");
+
+			const projectScout = withProject.find((p) => p.name === "project:scout");
+			assert.equal(projectScout?.source, "project");
+			assert.equal(projectScout?.description, "Project scout override");
+			assert.equal(projectScout?.mode, "coder");
+			assert.equal(projectScout?.workspace, "worktree");
+			assert.equal(projectScout?.systemPrompt, "Project scout prompt.");
 		});
 	});
 

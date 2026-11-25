@@ -1,11 +1,28 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { getAgyPiCacheSubdir } from "./paths.js";
+import {
+	ensurePrivateDir,
+	getAgyPiCacheSubdir,
+	isPathInsideDir,
+	readNoFollowBounded,
+	safeRealpath,
+} from "./paths.js";
 import type { SessionSummary } from "./types.js";
+
+const SESSION_HEADER_READ_BYTES = 8 * 1024;
 
 export function getDefaultAgyPiSessionDir(): string {
 	return getAgyPiCacheSubdir("AGY_PI_SESSION_DIR", "sessions");
+}
+
+function readSessionFirstLine(filePath: string): string | undefined {
+	const buf = readNoFollowBounded(filePath, SESSION_HEADER_READ_BYTES, true);
+	if (!buf) return undefined;
+	const content = buf.toString("utf8");
+	const newlineIdx = content.indexOf("\n");
+	const firstLine = (newlineIdx === -1 ? content : content.slice(0, newlineIdx)).trim();
+	return firstLine.length > 0 ? firstLine : undefined;
 }
 
 function findSessionFileByIdInDir(sessionDir: string, sessionId: string): string | undefined {
@@ -14,9 +31,7 @@ function findSessionFileByIdInDir(sessionDir: string, sessionId: string): string
 		if (!entry.endsWith(".jsonl")) continue;
 		const fullPath = join(sessionDir, entry);
 		try {
-			const content = readFileSync(fullPath, "utf8");
-			const newlineIdx = content.indexOf("\n");
-			const firstLine = (newlineIdx === -1 ? content : content.slice(0, newlineIdx)).trim();
+			const firstLine = readSessionFirstLine(fullPath);
 			if (!firstLine) continue;
 			const header = JSON.parse(firstLine) as { type?: unknown; id?: unknown };
 			if (header.type === "session" && header.id === sessionId) {
@@ -27,6 +42,47 @@ function findSessionFileByIdInDir(sessionDir: string, sessionId: string): string
 		}
 	}
 	return undefined;
+}
+
+function assertValidSessionFileInDir(candidatePath: string, sessionDir: string): string {
+	const resolvedSessionDir = resolve(sessionDir);
+	const resolvedCandidate = resolve(candidatePath);
+	if (!isPathInsideDir(resolvedCandidate, resolvedSessionDir)) {
+		throw new Error(`Refusing to open session path outside ${resolvedSessionDir}.`);
+	}
+	let stat;
+	try {
+		stat = lstatSync(resolvedCandidate);
+	} catch {
+		throw new Error(`Session "${candidatePath}" not found in ${resolvedSessionDir}.`);
+	}
+	if (stat.isSymbolicLink() || !stat.isFile()) {
+		throw new Error(`Refusing to open non-regular or symlinked session file "${candidatePath}".`);
+	}
+	if (!isPathInsideDir(safeRealpath(resolvedCandidate), safeRealpath(resolvedSessionDir))) {
+		throw new Error(`Refusing to open session path escaping ${resolvedSessionDir}.`);
+	}
+	return resolvedCandidate;
+}
+
+function resolveExistingSessionPath(rawId: string, cwd: string, sessionDir: string): string {
+	if (rawId.includes("\0")) {
+		throw new Error("Invalid session identifier.");
+	}
+	if (rawId.endsWith(".jsonl") || rawId.includes("/") || rawId.includes("\\")) {
+		const candidatePath = isAbsolute(rawId) ? resolve(rawId) : resolve(sessionDir, rawId);
+		return assertValidSessionFileInDir(candidatePath, sessionDir);
+	}
+	if (rawId.includes("..") || rawId.trim().length === 0) {
+		throw new Error(`Session "${rawId}" not found in ${sessionDir}.`);
+	}
+	const found =
+		SessionManager.findById(cwd, rawId, sessionDir) ??
+		findSessionFileByIdInDir(sessionDir, rawId);
+	if (!found) {
+		throw new Error(`Session "${rawId}" not found in ${sessionDir}.`);
+	}
+	return assertValidSessionFileInDir(found, sessionDir);
 }
 
 export function openOrCreateSession(options: {
@@ -41,27 +97,11 @@ export function openOrCreateSession(options: {
 	}
 
 	const sessionDir = options.sessionDir ? resolve(options.sessionDir) : getDefaultAgyPiSessionDir();
-	mkdirSync(sessionDir, { recursive: true });
+	ensurePrivateDir(sessionDir);
 
 	if (options.sessionId) {
-		const candidatePath = resolve(cwd, options.sessionId);
-		if (options.sessionId.endsWith(".jsonl") && existsSync(candidatePath) && statSync(candidatePath).isFile()) {
-			return SessionManager.open(candidatePath, sessionDir, cwd);
-		}
-		const directPath = existsSync(options.sessionId) && statSync(options.sessionId).isFile()
-			? resolve(options.sessionId)
-			: undefined;
-		if (directPath) {
-			return SessionManager.open(directPath, sessionDir, cwd);
-		}
-
-		const found =
-			SessionManager.findById(cwd, options.sessionId, sessionDir) ??
-			findSessionFileByIdInDir(sessionDir, options.sessionId);
-		if (!found) {
-			throw new Error(`Session "${options.sessionId}" not found in ${sessionDir}.`);
-		}
-		return SessionManager.open(found, sessionDir, cwd);
+		const sessionPath = resolveExistingSessionPath(options.sessionId, cwd, sessionDir);
+		return SessionManager.open(sessionPath, sessionDir, cwd);
 	}
 
 	return SessionManager.create(cwd, sessionDir);

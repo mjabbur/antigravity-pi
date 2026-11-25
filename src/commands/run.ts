@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
-	DefaultResourceLoader,
+	createExtensionRuntime,
 	type ModelRuntime,
 	type ResourceLoader,
 	type SessionManager,
 	type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { findAgentProfile } from "../agents.js";
+import { getToolValidationError } from "../args.js";
 import { formatPromptWithFiles, loadAttachedFiles } from "../files.js";
 import { ProgressLogger, summarizeToolArgs } from "../progress.js";
 import { CliAbortError, initPiRuntime, resolveTargetModel } from "../runtime.js";
@@ -17,20 +18,27 @@ import { openOrCreateSession } from "../sessions.js";
 import {
 	generateSubagentId,
 	listSubagents,
+	readProcessStartTime,
 	saveSubagentRecord,
 } from "../subagents.js";
-import type {
-	AgentProfile,
-	RunMode,
-	RunResult,
-	SubagentRecord,
-	SubagentWorktreeInfo,
-	ThinkingLevel,
-	TokenUsageSummary,
-	ToolExecutionSummary,
-	WorkspaceMode,
+import {
+	type AgentProfile,
+	KNOWN_BUILTIN_TOOLS,
+	READONLY_TOOLS,
+	type RunMode,
+	type RunResult,
+	type SubagentRecord,
+	type SubagentWorktreeInfo,
+	type ThinkingLevel,
+	type TokenUsageSummary,
+	type ToolExecutionSummary,
+	type WorkspaceMode,
 } from "../types.js";
-import { createWorktree, getWorktreeDiff } from "../worktree.js";
+import { createWorktree, getWorktreeDiff, removeWorktree } from "../worktree.js";
+
+export { KNOWN_BUILTIN_TOOLS, READONLY_TOOLS };
+
+const READONLY_TOOL_SET = new Set<string>(READONLY_TOOLS);
 
 export interface RunCommandOptions {
 	agent?: string;
@@ -187,16 +195,49 @@ function loadValidatedProfile(
 	return agentProfile;
 }
 
+function validateEffectiveTools(tools: readonly string[]): string[] {
+	if (tools.length === 0) {
+		throw new Error("Tool allowlist cannot be empty.");
+	}
+	const deduped: string[] = [];
+	const seen = new Set<string>();
+	for (const tool of tools) {
+		const trimmed = tool.trim();
+		const toolError = getToolValidationError(trimmed);
+		if (toolError) {
+			throw new Error(toolError);
+		}
+		if (!seen.has(trimmed)) {
+			seen.add(trimmed);
+			deduped.push(trimmed);
+		}
+	}
+	return deduped;
+}
+
 function resolveExecutionConfig(
 	options: RunCommandOptions,
 	agentProfile: AgentProfile | undefined,
 ): Pick<RunSetup, "mode" | "tools" | "workspace" | "combinedSystemPrompt"> {
 	const existing = options.existingSubagent;
 	const explicitMode = options.modeExplicit ? options.mode : undefined;
-	const mode: RunMode = explicitMode ?? agentProfile?.mode ?? existing?.mode ?? options.mode ?? "readonly";
-	const tools =
+	const requestedMode: RunMode =
+		explicitMode ?? agentProfile?.mode ?? existing?.mode ?? options.mode ?? "readonly";
+	const rawTools =
 		options.tools ??
-		(explicitMode ? MODE_TOOLS[explicitMode] : agentProfile?.tools ?? MODE_TOOLS[mode]);
+		agentProfile?.tools ??
+		existing?.tools ??
+		MODE_TOOLS[requestedMode];
+	const tools = validateEffectiveTools(rawTools);
+
+	const nonReadonlyTools = tools.filter((tool) => !READONLY_TOOL_SET.has(tool));
+	if (options.modeExplicit && options.mode === "readonly" && nonReadonlyTools.length > 0) {
+		throw new Error(
+			`Mode "readonly" cannot be used with non-readonly tools: ${nonReadonlyTools.join(", ")}.`,
+		);
+	}
+
+	const mode: RunMode = nonReadonlyTools.length === 0 ? "readonly" : "coder";
 	const workspace: WorkspaceMode = existing
 		? existing.workspace
 		: (options.workspace ?? agentProfile?.workspace ?? "inherit");
@@ -280,6 +321,9 @@ function createInitialSubagentRecord(params: {
 		pickUniqueSubagentId(generateSubagentId(options.agent ?? "sub", sessionId), deps.subagentsDir);
 	const agentName = setup.agentProfile?.name ?? existing?.agent;
 
+	const pid = deps.pid ?? process.pid;
+	const pidStartTime = readProcessStartTime(pid);
+
 	return {
 		id: subagentId,
 		name: existing?.name ?? options.name ?? subagentId,
@@ -295,7 +339,8 @@ function createInitialSubagentRecord(params: {
 		effectiveCwd,
 		workspace: setup.workspace,
 		...(worktreeInfo ? { worktree: worktreeInfo } : {}),
-		pid: deps.pid ?? process.pid,
+		pid,
+		...(pidStartTime !== undefined ? { pidStartTime } : {}),
 		status: "running",
 		turns: existing?.turns ?? 0,
 		toolCalls: existing?.toolCalls ?? 0,
@@ -337,44 +382,62 @@ async function resolveWorkspaceCwd(
 	return { effectiveCwd: baseCwd };
 }
 
-async function resolveSessionResourceLoader(params: {
-	resourceLoader?: ResourceLoader;
-	effectiveCwd: string;
-	agentDir: string;
-	settingsManager: SettingsManager;
-	combinedSystemPrompt?: string;
-}): Promise<ResourceLoader> {
-	if (params.resourceLoader) {
-		return params.resourceLoader;
-	}
-	const loader = new DefaultResourceLoader({
-		cwd: params.effectiveCwd,
-		agentDir: params.agentDir,
-		settingsManager: params.settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		appendSystemPrompt: params.combinedSystemPrompt ? [params.combinedSystemPrompt] : undefined,
-	});
-	await loader.reload();
-	return loader;
+export function createLiteralResourceLoader(systemPrompt?: string): ResourceLoader {
+	const runtime = createExtensionRuntime();
+	return {
+		getExtensions: () => ({ extensions: [], errors: [], runtime }),
+		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getThemes: () => ({ themes: [], diagnostics: [] }),
+		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getSystemPrompt: () => undefined,
+		getSystemPromptSource: () => undefined,
+		getAppendSystemPrompt: () => (systemPrompt ? [systemPrompt] : []),
+		getAppendSystemPromptSources: () => [],
+		extendResources: () => {},
+		reload: async () => {},
+	};
 }
 
-async function prepareWorktreeAndSession(
-	options: RunCommandOptions,
-	deps: RunCommandDeps,
-	setup: RunSetup,
-	baseCwd: string,
-	progress: ProgressLogger,
-): Promise<PreparedSession> {
-	const { effectiveCwd, worktreeInfo } = await resolveWorkspaceCwd(
+function resolveSessionAndPersistRecord(params: {
+	options: RunCommandOptions;
+	deps: RunCommandDeps;
+	setup: RunSetup;
+	sessionManager: SessionManager;
+	model: { provider: string; id: string };
+	thinkingLevel: ThinkingLevel;
+	baseCwd: string;
+	effectiveCwd: string;
+	worktreeInfo?: SubagentWorktreeInfo;
+}): SubagentRecord | undefined {
+	const { options, deps, setup, sessionManager, model, thinkingLevel, baseCwd, effectiveCwd, worktreeInfo } = params;
+	if (options.noSession) return undefined;
+	const record = createInitialSubagentRecord({
 		options,
 		deps,
-		setup.workspace,
+		setup,
+		sessionId: sessionManager.getSessionId(),
+		sessionFile: sessionManager.getSessionFile(),
+		model,
+		thinkingLevel,
 		baseCwd,
-		progress,
-	);
+		effectiveCwd,
+		worktreeInfo,
+	});
+	saveSubagentRecord(record, deps.subagentsDir);
+	return record;
+}
+
+async function createSessionForWorkspace(params: {
+	options: RunCommandOptions;
+	deps: RunCommandDeps;
+	setup: RunSetup;
+	baseCwd: string;
+	effectiveCwd: string;
+	worktreeInfo?: SubagentWorktreeInfo;
+	progress: ProgressLogger;
+}): Promise<PreparedSession> {
+	const { options, deps, setup, baseCwd, effectiveCwd, worktreeInfo, progress } = params;
 	const existing = options.existingSubagent;
 	const sessionManager =
 		deps.sessionManager ??
@@ -393,17 +456,10 @@ async function prepareWorktreeAndSession(
 		defaultThinking: existing?.thinkingLevel ?? "medium",
 		fallbackSessionModel: sessionManager.buildSessionContext().model,
 	});
-	if (warning) {
-		progress.log(`warning: ${warning}`);
-	}
+	if (warning) progress.log(`warning: ${warning}`);
 
-	const resourceLoader = await resolveSessionResourceLoader({
-		resourceLoader: deps.resourceLoader,
-		effectiveCwd,
-		agentDir: setup.agentDir,
-		settingsManager: setup.settingsManager,
-		combinedSystemPrompt: setup.combinedSystemPrompt,
-	});
+	const resourceLoader =
+		deps.resourceLoader ?? createLiteralResourceLoader(setup.combinedSystemPrompt);
 
 	const { session } = await createAgentSession({
 		cwd: effectiveCwd,
@@ -417,36 +473,74 @@ async function prepareWorktreeAndSession(
 		settingsManager: setup.settingsManager,
 	});
 
-	const sessionId = sessionManager.getSessionId();
-	const sessionFile = sessionManager.getSessionFile();
-	const subagentRecord = options.noSession
-		? undefined
-		: createInitialSubagentRecord({
-				options,
-				deps,
-				setup,
-				sessionId,
-				sessionFile,
-				model,
-				thinkingLevel,
-				baseCwd,
-				effectiveCwd,
-				worktreeInfo,
-			});
-	if (subagentRecord) {
-		saveSubagentRecord(subagentRecord, deps.subagentsDir);
-	}
+	const subagentRecord = resolveSessionAndPersistRecord({
+		options,
+		deps,
+		setup,
+		sessionManager,
+		model,
+		thinkingLevel,
+		baseCwd,
+		effectiveCwd,
+		worktreeInfo,
+	});
 
 	return {
 		session,
-		sessionId,
-		sessionFile,
+		sessionId: sessionManager.getSessionId(),
+		sessionFile: sessionManager.getSessionFile(),
 		model,
 		thinkingLevel,
 		effectiveCwd,
 		worktreeInfo,
 		subagentRecord,
 	};
+}
+
+async function prepareWorktreeAndSession(
+	options: RunCommandOptions,
+	deps: RunCommandDeps,
+	setup: RunSetup,
+	baseCwd: string,
+	progress: ProgressLogger,
+): Promise<PreparedSession> {
+	const { effectiveCwd, worktreeInfo } = await resolveWorkspaceCwd(
+		options,
+		deps,
+		setup.workspace,
+		baseCwd,
+		progress,
+	);
+	let sessionReady = false;
+	try {
+		const prepared = await createSessionForWorkspace({
+			options,
+			deps,
+			setup,
+			baseCwd,
+			effectiveCwd,
+			worktreeInfo,
+			progress,
+		});
+		sessionReady = true;
+		return prepared;
+	} finally {
+		if (!sessionReady && !options.existingSubagent && worktreeInfo) {
+			await removeWorktree({
+				repoRoot: worktreeInfo.repoRoot,
+				worktreePath: worktreeInfo.path,
+				branch: worktreeInfo.branch,
+				baseCommit: worktreeInfo.baseCommit,
+				force: true,
+				deleteBranch: true,
+				worktreesDir: deps.worktreesDir,
+			}).catch((rollbackError: unknown) => {
+				const detail =
+					rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+				progress.log(`warning: failed to roll back worktree: ${detail}`);
+			});
+		}
+	}
 }
 
 function accumulateAssistantUsage(usageTotals: TokenUsageSummary, msg: AssistantMessage): void {
@@ -573,7 +667,9 @@ async function fetchWorktreeResult(
 ): Promise<RunResult["worktree"]> {
 	if (!worktreeInfo) return undefined;
 	try {
-		const diffResult = await getWorktreeDiff(worktreeInfo.path, worktreeInfo.baseCommit);
+		const diffResult = await getWorktreeDiff(worktreeInfo.path, worktreeInfo.baseCommit, {
+			statOnly: true,
+		});
 		return {
 			path: worktreeInfo.path,
 			branch: worktreeInfo.branch,
@@ -690,14 +786,18 @@ export async function runAgentCommand(
 	}
 
 	const setup = await resolveRunSetup(options, deps, baseCwd, progress);
-	const prepared = await prepareWorktreeAndSession(options, deps, setup, baseCwd, progress);
-	const tracker = attachSessionProgress(prepared.session, progress, deps.signal);
+	let prepared: PreparedSession | undefined;
+	let tracker: SessionProgressTracker | undefined;
 	let runErrorMessage: string | undefined;
 
 	try {
+		prepared = await prepareWorktreeAndSession(options, deps, setup, baseCwd, progress);
+		tracker = attachSessionProgress(prepared.session, progress, deps.signal);
+
 		progress.log(
 			`run ${prepared.model.provider}/${prepared.model.id} (mode=${setup.mode}, thinking=${prepared.thinkingLevel})`,
 		);
+		deps.signal?.throwIfAborted();
 		await prepared.session.prompt(setup.fullPrompt);
 		await prepared.session.waitForIdle();
 		return await finalizeSubagentRun({
@@ -714,10 +814,10 @@ export async function runAgentCommand(
 		runErrorMessage = error instanceof Error ? error.message : String(error);
 		throw error;
 	} finally {
-		tracker.removeAbortListener();
-		tracker.unsubscribe();
-		prepared.session.dispose();
-		if (prepared.subagentRecord) {
+		tracker?.removeAbortListener();
+		tracker?.unsubscribe();
+		prepared?.session.dispose();
+		if (prepared?.subagentRecord && tracker) {
 			const state = tracker.getState();
 			saveFinishedSubagentRecord({
 				subagentRecord: prepared.subagentRecord,

@@ -1,13 +1,17 @@
 import { resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { isValidSubagentName } from "./subagents.js";
-import type {
-	ParsedCommand,
-	RunMode,
-	SubagentStatus,
-	ThinkingLevel,
-	WorkspaceMode,
+import {
+	KNOWN_BUILTIN_TOOLS,
+	type ParsedCommand,
+	READONLY_TOOLS,
+	type RunMode,
+	type SubagentStatus,
+	type ThinkingLevel,
+	type WorkspaceMode,
 } from "./types.js";
+
+export { KNOWN_BUILTIN_TOOLS, READONLY_TOOLS };
 
 export const VALID_THINKING_LEVELS: readonly ThinkingLevel[] = [
 	"off",
@@ -145,6 +149,24 @@ function validateEnum<T extends string>(
 	);
 }
 
+const KNOWN_TOOL_SET = new Set<string>(KNOWN_BUILTIN_TOOLS);
+
+/**
+ * Returns an error description if a tool entry uses modifiers, wildcards, or an unknown name.
+ */
+export function getToolValidationError(tool: string): string | undefined {
+	if (tool.startsWith("+") || tool.startsWith("-")) {
+		return `Tool modifier "${tool}" is not allowed. Allowed tools: ${KNOWN_BUILTIN_TOOLS.join(", ")}.`;
+	}
+	if (tool.includes("*")) {
+		return `Wildcard tool pattern "${tool}" is not allowed. Allowed tools: ${KNOWN_BUILTIN_TOOLS.join(", ")}.`;
+	}
+	if (!KNOWN_TOOL_SET.has(tool)) {
+		return `Unknown tool "${tool}". Allowed tools: ${KNOWN_BUILTIN_TOOLS.join(", ")}.`;
+	}
+	return undefined;
+}
+
 function validateTools(value: string | undefined): string[] | undefined {
 	if (value === undefined) return undefined;
 	const parts = value.split(",").map((part) => part.trim());
@@ -156,6 +178,10 @@ function validateTools(value: string | undefined): string[] | undefined {
 	const deduped: string[] = [];
 	const seen = new Set<string>();
 	for (const part of parts) {
+		const toolError = getToolValidationError(part);
+		if (toolError) {
+			throw new CliUsageError(`Invalid --tools "${value}": ${toolError}`);
+		}
 		if (!seen.has(part)) {
 			seen.add(part);
 			deduped.push(part);

@@ -49,7 +49,7 @@ export async function initPiRuntime(options?: {
 	const modelsPath = options?.agentDir ? join(agentDir, "models.json") : undefined;
 	const refresh = options?.refresh === true;
 
-	const settingsManager = SettingsManager.create(cwd, agentDir);
+	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	const modelRuntime = await ModelRuntime.create({
 		authPath,
 		modelsPath,
@@ -58,15 +58,18 @@ export async function initPiRuntime(options?: {
 
 	if (hasNonEmptyDirectory(join(agentDir, "extensions"))) {
 		const services = await createAgentSessionServices({
-			cwd,
+			cwd: agentDir,
 			agentDir,
 			modelRuntime,
-			settingsManager,
+			settingsManager: SettingsManager.create(agentDir, agentDir, { projectTrusted: false }),
 			resourceLoaderOptions: {
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
 				noContextFiles: true,
+			},
+			resourceLoaderReloadOptions: {
+				resolveProjectTrust: async () => false,
 			},
 		});
 		if (refresh) {
@@ -74,7 +77,7 @@ export async function initPiRuntime(options?: {
 		}
 		return {
 			modelRuntime: services.modelRuntime,
-			settingsManager: services.settingsManager,
+			settingsManager,
 			agentDir: services.agentDir,
 		};
 	}

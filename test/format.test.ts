@@ -452,12 +452,24 @@ describe("summarizeToolArgs", () => {
 		assert.equal(summarizeToolArgs("ls", {}), ".");
 		assert.equal(summarizeToolArgs("ls", { path: "src/commands" }), "src/commands");
 		assert.equal(summarizeToolArgs("bash", { command: "npm\n  test" }), "npm test");
+		assert.equal(
+			summarizeToolArgs("bash", { command: "FOO=secret npm test -- --token=abc123" }),
+			"npm test",
+		);
+		assert.equal(
+			summarizeToolArgs("bash", { command: "curl -H 'Authorization: Bearer sk-1234567890' https://example.com" }),
+			"curl",
+		);
 	});
 
 	it("summarizes unknown tool objects and non-object values", () => {
-		assert.equal(summarizeToolArgs("custom", { a: 1, b: "ok" }), '{"a":1,"b":"ok"}');
-		assert.equal(summarizeToolArgs("custom", { long: "x".repeat(120) }).length, 80);
-		assert.ok(summarizeToolArgs("custom", { long: "x".repeat(120) }).endsWith("..."));
+		assert.equal(summarizeToolArgs("custom", { a: 1, b: "ok" }), "keys=[a, b]");
+		assert.equal(summarizeToolArgs("custom", { long: "x".repeat(120) }), "keys=[long]");
+		const manyKeys = Object.fromEntries(
+			Array.from({ length: 20 }, (_, i) => [`very_long_key_${i}`, i]),
+		);
+		assert.equal(summarizeToolArgs("custom", manyKeys).length, 80);
+		assert.ok(summarizeToolArgs("custom", manyKeys).endsWith("..."));
 		assert.equal(summarizeToolArgs("custom", undefined), "");
 		assert.equal(summarizeToolArgs("custom", null), "null");
 		assert.equal(summarizeToolArgs("custom", "raw"), "raw");

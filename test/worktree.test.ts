@@ -171,6 +171,7 @@ describe("worktree", () => {
 						branch: created.worktree.branch,
 						baseCommit: created.worktree.baseCommit,
 						force: false,
+						worktreesDir,
 					}),
 				/has uncommitted changes/,
 			);
@@ -182,6 +183,7 @@ describe("worktree", () => {
 				branch: created.worktree.branch,
 				baseCommit: created.worktree.baseCommit,
 				force: true,
+				worktreesDir,
 			});
 			assert.equal(forced.removedWorktree, created.worktree.path);
 			assert.equal(forced.deletedBranch, created.worktree.branch);
@@ -204,6 +206,7 @@ describe("worktree", () => {
 				worktreePath: zeroAhead.worktree.path,
 				branch: zeroAhead.worktree.branch,
 				baseCommit: zeroAhead.worktree.baseCommit,
+				worktreesDir,
 			});
 			assert.equal(resZero.deletedBranch, zeroAhead.worktree.branch);
 			assert.equal(resZero.preservedBranch, undefined);
@@ -224,6 +227,7 @@ describe("worktree", () => {
 				branch: oneAheadKeep.worktree.branch,
 				baseCommit: oneAheadKeep.worktree.baseCommit,
 				deleteBranch: false,
+				worktreesDir,
 			});
 			assert.equal(resKeep.preservedBranch, oneAheadKeep.worktree.branch);
 			assert.equal(resKeep.deletedBranch, undefined);
@@ -248,6 +252,7 @@ describe("worktree", () => {
 				branch: oneAheadDelete.worktree.branch,
 				baseCommit: oneAheadDelete.worktree.baseCommit,
 				deleteBranch: true,
+				worktreesDir,
 			});
 			assert.equal(resDelete.deletedBranch, oneAheadDelete.worktree.branch);
 			assert.equal(resDelete.preservedBranch, undefined);

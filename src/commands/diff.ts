@@ -26,6 +26,7 @@ export async function runDiffCommand(
 	const diffData = await getWorktreeDiff(
 		record.worktree.path,
 		record.worktree.baseCommit,
+		{ statOnly: options.statOnly },
 	);
 
 	return {

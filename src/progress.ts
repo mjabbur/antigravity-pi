@@ -7,14 +7,89 @@ export interface ProgressLoggerOptions {
 	now?: () => number;
 }
 
+const ANSI_ESCAPE_PATTERN =
+	// eslint-disable-next-line no-control-regex
+	/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x9d[^\x07\x9c]*[\x07\x9c]|\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|\x1b[ -/]+[@-~]/g;
+
+// eslint-disable-next-line no-control-regex
+const ALL_CONTROLS_PATTERN = /[\x00-\x1f\x7f-\x9f]/g;
+// eslint-disable-next-line no-control-regex
+const CONTROLS_EXCEPT_NL_TAB_PATTERN = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+const SAFE_COMMAND_TOKEN_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,60}$/;
+const ENV_ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Strips ANSI CSI/OSC escape sequences and C0/C1 control characters from terminal output.
+ */
+export function stripTerminalControls(
+	text: string,
+	options: { preserveNewlines?: boolean } = {},
+): string {
+	const withoutAnsi = text.replace(ANSI_ESCAPE_PATTERN, "");
+	const controlPattern = options.preserveNewlines
+		? CONTROLS_EXCEPT_NL_TAB_PATTERN
+		: ALL_CONTROLS_PATTERN;
+	return withoutAnsi.replace(controlPattern, "");
+}
+
+/**
+ * Redacts common API keys, tokens, and bearer credentials from log strings.
+ */
+export function redactSecrets(text: string): string {
+	return text
+		.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]{4,}/gi, "Bearer [REDACTED]")
+		.replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}/g, "[REDACTED]")
+		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{10,}/g, "[REDACTED]")
+		.replace(/\bAIza[0-9A-Za-z\-_]{16,}/g, "[REDACTED]")
+		.replace(
+			/\b(api[_-]?key|token|secret|password|authorization)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi,
+			"$1$2[REDACTED]",
+		);
+}
+
 function collapseSingleLine(text: string): string {
-	return text.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+	const normalized = stripTerminalControls(text.replace(/[\r\n\t]+/g, " "));
+	return normalized.replace(/\s+/g, " ").trim();
 }
 
 function truncateText(text: string, maxLen: number): string {
-	const single = collapseSingleLine(text);
+	const single = redactSecrets(collapseSingleLine(text));
 	if (single.length <= maxLen) return single;
 	return `${single.slice(0, Math.max(0, maxLen - 3))}...`;
+}
+
+function summarizeShellCommand(command: string): string {
+	const cleaned = collapseSingleLine(command);
+	if (!cleaned) return "";
+
+	const tokens = cleaned.split(/\s+/);
+	let index = 0;
+	while (index < tokens.length && ENV_ASSIGNMENT_PATTERN.test(tokens[index])) {
+		index += 1;
+	}
+	if (index >= tokens.length) {
+		return "[redacted]";
+	}
+
+	const summaryTokens: string[] = [];
+	const executable = tokens[index];
+	if (executable.startsWith("-") || /["'$`]/.test(executable)) {
+		return "[redacted]";
+	}
+	summaryTokens.push(executable);
+
+	const subcommand = tokens[index + 1];
+	if (
+		subcommand &&
+		!subcommand.startsWith("-") &&
+		!ENV_ASSIGNMENT_PATTERN.test(subcommand) &&
+		SAFE_COMMAND_TOKEN_PATTERN.test(subcommand)
+	) {
+		summaryTokens.push(subcommand);
+	}
+
+	return truncateText(summaryTokens.join(" "), 80);
 }
 
 export class ProgressLogger {
@@ -42,7 +117,7 @@ export class ProgressLogger {
 
 	log(message: string): void {
 		if (this.quiet) return;
-		const clean = collapseSingleLine(message);
+		const clean = redactSecrets(collapseSingleLine(message));
 		if (!clean) return;
 		this.stream.write(`[agy-pi ${this.formatElapsed()}] ${clean}\n`);
 	}
@@ -60,7 +135,9 @@ export class ProgressLogger {
 
 export function summarizeToolArgs(toolName: string, args: unknown): string {
 	if (typeof args !== "object" || args === null || Array.isArray(args)) {
-		return args === undefined ? "" : truncateText(String(args), 80);
+		if (args === undefined) return "";
+		if (Array.isArray(args)) return `[array(${args.length})]`;
+		return truncateText(String(args), 80);
 	}
 
 	const record = args as Record<string, unknown>;
@@ -102,15 +179,13 @@ export function summarizeToolArgs(toolName: string, args: unknown): string {
 		case "ls": {
 			return truncateText(str("path") ?? ".", 100);
 		}
-		case "bash": {
-			return truncateText(str("command") ?? "", 80);
+		case "bash":
+		case "powershell": {
+			return summarizeShellCommand(str("command") ?? "");
 		}
 		default: {
-			try {
-				return truncateText(JSON.stringify(record), 80);
-			} catch {
-				return "";
-			}
+			const keys = Object.keys(record).sort((a, b) => a.localeCompare(b));
+			return keys.length > 0 ? truncateText(`keys=[${keys.join(", ")}]`, 80) : "";
 		}
 	}
 }

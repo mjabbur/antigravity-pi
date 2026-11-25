@@ -23,7 +23,7 @@ import {
 	formatSessionsText,
 	formatSubagentsText,
 } from "./format.js";
-import { ProgressLogger } from "./progress.js";
+import { ProgressLogger, stripTerminalControls } from "./progress.js";
 import { CliAbortError, initPiRuntime, type PiRuntime } from "./runtime.js";
 import type { ParsedCommand } from "./types.js";
 
@@ -184,7 +184,9 @@ function formatCliError(
 
 	const exitCode = resolveErrorExitCode(error, isUsage, isAbort, abortState);
 	const rawMessage = error instanceof Error ? error.message : String(error);
-	const message = isAbort && abortState.reason ? abortState.reason : rawMessage;
+	const message = stripTerminalControls(
+		isAbort && abortState.reason ? abortState.reason : rawMessage,
+	);
 
 	if (jsonErrorMode) {
 		const errorType = isUsage ? "usage_error" : isAbort ? "aborted" : "runtime_error";

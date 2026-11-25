@@ -21,6 +21,12 @@ Choose one of three installation methods:
 curl -fsSL https://raw.githubusercontent.com/mjabbur/antigravity-pi/main/scripts/install.sh | bash
 ```
 
+You can optionally pin to a specific git tag or commit SHA using `AGY_PI_REF`:
+
+```bash
+AGY_PI_REF=v1.0.0 curl -fsSL https://raw.githubusercontent.com/mjabbur/antigravity-pi/main/scripts/install.sh | bash
+```
+
 ### 2. From a local clone
 
 ```bash
@@ -35,6 +41,14 @@ cd antigravity-pi
 npm install -g github:mjabbur/antigravity-pi
 agy plugin install https://github.com/mjabbur/antigravity-pi
 ```
+
+---
+
+## Security Model
+
+- `agy-pi` runs with `projectTrusted: false` and a literal resource loader by default, ensuring untrusted repositories cannot trigger package installation, load `.pi/extensions`, or inject local files as system prompts.
+- `--project-agents` is strictly opt-in, stops traversal at the repository root, rejects symlinks, and never silently shadows user profiles located in `~/.pi/agent/agents/`.
+- `--workspace worktree` isolates Git edits on a dedicated branch (`agy-pi/<name>`), **not** the operating system: Pi's built-in tools (`read`, `bash`, etc.) run with the invoking user's OS permissions. For untrusted repositories, execute inside a container or sandboxed VM.
 
 ---
 

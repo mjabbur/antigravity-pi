@@ -1,13 +1,28 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { getAgyPiCacheSubdir } from "./paths.js";
+import {
+	ensurePrivateDir,
+	getAgyPiCacheSubdir,
+	isPathInsideDir,
+	safeRealpath,
+} from "./paths.js";
 import type { SubagentWorktreeInfo } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
+const GIT_COMMIT_HASH_PATTERN = /^[0-9a-f]{40}([0-9a-f]{24})?$/i;
+const MANAGED_WORKTREE_BRANCH_PATTERN = /^agy-pi\/[a-z0-9][a-z0-9._-]{0,80}$/;
+
+export function isValidGitCommitHash(value: string): boolean {
+	return GIT_COMMIT_HASH_PATTERN.test(value);
+}
+
+export function isManagedWorktreeBranch(branch: string): boolean {
+	return MANAGED_WORKTREE_BRANCH_PATTERN.test(branch) && !branch.includes("..");
+}
 
 export function getDefaultWorktreesDir(): string {
 	return getAgyPiCacheSubdir("AGY_PI_WORKTREE_DIR", "worktrees");
@@ -28,26 +43,28 @@ async function runGit(
 	cwd: string,
 	args: string[],
 ): Promise<{ stdout: string; stderr: string }> {
-	return execFileAsync("git", ["-C", cwd, ...args], {
-		encoding: "utf8",
-		maxBuffer: MAX_GIT_OUTPUT_BYTES,
-	});
+	return execFileAsync(
+		"git",
+		["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", cwd, ...args],
+		{
+			encoding: "utf8",
+			maxBuffer: MAX_GIT_OUTPUT_BYTES,
+		},
+	);
 }
 
 async function gitRefExists(repoRoot: string, ref: string): Promise<boolean> {
 	try {
-		await runGit(repoRoot, ["show-ref", "--verify", "--quiet", ref]);
+		await runGit(repoRoot, ["show-ref", "--verify", "--quiet", "--", ref]);
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-function safeRealpath(targetPath: string): string {
-	try {
-		return realpathSync(targetPath);
-	} catch {
-		return resolve(targetPath);
+function assertValidBaseCommit(baseCommit: string): void {
+	if (!isValidGitCommitHash(baseCommit)) {
+		throw new Error(`Invalid git baseCommit "${baseCommit}".`);
 	}
 }
 
@@ -77,12 +94,13 @@ export async function createWorktree(options: {
 			`Cannot create git worktree: git repository at "${repoRoot}" has no commits (HEAD is unborn).`,
 		);
 	}
+	assertValidBaseCommit(baseCommit);
 
 	const relSubpath = relative(safeRealpath(repoRoot), safeRealpath(resolvedCwd));
 	const worktreesBaseDir = options.worktreesDir
 		? resolve(options.worktreesDir)
 		: getDefaultWorktreesDir();
-	mkdirSync(worktreesBaseDir, { recursive: true });
+	ensurePrivateDir(worktreesBaseDir);
 
 	const baseSlug = sanitizeSlug(options.slug);
 	let worktreePath = "";
@@ -111,7 +129,7 @@ export async function createWorktree(options: {
 	}
 
 	try {
-		await runGit(repoRoot, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+		await runGit(repoRoot, ["worktree", "add", "-b", branch, "--", worktreePath, "HEAD"]);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`Failed to create git worktree at "${worktreePath}": ${detail}`);
@@ -133,9 +151,25 @@ export async function createWorktree(options: {
 	};
 }
 
+async function countCommitsBetween(
+	cwd: string,
+	baseCommit: string,
+	targetRef: string,
+	fallback: number,
+): Promise<number> {
+	try {
+		const countRes = await runGit(cwd, ["rev-list", "--count", `${baseCommit}..${targetRef}`]);
+		const parsed = Number.parseInt(countRes.stdout.trim(), 10);
+		return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+	} catch {
+		return fallback;
+	}
+}
+
 export async function getWorktreeDiff(
 	worktreePath: string,
 	baseCommit?: string,
+	options: { statOnly?: boolean } = {},
 ): Promise<{
 	statusShort: string;
 	diffStat: string;
@@ -147,37 +181,30 @@ export async function getWorktreeDiff(
 	if (!existsSync(resolvedPath)) {
 		throw new Error(`Worktree directory does not exist: ${resolvedPath}`);
 	}
+	if (baseCommit !== undefined) {
+		assertValidBaseCommit(baseCommit);
+	}
 
 	const statusRes = await runGit(resolvedPath, ["status", "--short"]);
 	const statusShort = statusRes.stdout.trimEnd();
+	const commitsAhead = baseCommit ? await countCommitsBetween(resolvedPath, baseCommit, "HEAD", 0) : 0;
 
-	let commitsAhead = 0;
-	if (baseCommit) {
-		try {
-			const countRes = await runGit(resolvedPath, [
-				"rev-list",
-				"--count",
-				`${baseCommit}..HEAD`,
-			]);
-			const parsed = Number.parseInt(countRes.stdout.trim(), 10);
-			if (Number.isFinite(parsed) && parsed >= 0) {
-				commitsAhead = parsed;
-			}
-		} catch {
-			commitsAhead = 0;
-		}
-	}
-
-	const diffArgsBase = baseCommit ? [baseCommit] : [];
+	const diffBaseArgs = ["diff", "--no-ext-diff", "--no-textconv"];
+	const refArgs = baseCommit ? [baseCommit, "--"] : ["--"];
 	const [statRes, diffRes] = await Promise.all([
-		runGit(resolvedPath, ["diff", "--stat", ...diffArgsBase]),
-		runGit(resolvedPath, ["diff", ...diffArgsBase]),
+		runGit(resolvedPath, [...diffBaseArgs, "--stat", ...refArgs]),
+		options.statOnly
+			? Promise.resolve({ stdout: "", stderr: "" })
+			: runGit(resolvedPath, [...diffBaseArgs, ...refArgs]),
 	]);
 
 	const diffStat = statRes.stdout.trimEnd();
-	const diff = diffRes.stdout.trimEnd();
+	const diff = options.statOnly ? "" : diffRes.stdout.trimEnd();
 	const hasChanges =
-		statusShort.trim().length > 0 || diff.trim().length > 0 || commitsAhead > 0;
+		statusShort.trim().length > 0 ||
+		diffStat.trim().length > 0 ||
+		diff.trim().length > 0 ||
+		commitsAhead > 0;
 
 	return {
 		statusShort,
@@ -195,6 +222,7 @@ export async function removeWorktree(options: {
 	baseCommit?: string;
 	force?: boolean;
 	deleteBranch?: boolean;
+	worktreesDir?: string;
 }): Promise<{
 	removedWorktree?: string;
 	deletedBranch?: string;
@@ -202,8 +230,23 @@ export async function removeWorktree(options: {
 }> {
 	const repoRoot = resolve(options.repoRoot);
 	const worktreePath = resolve(options.worktreePath);
-	const force = options.force === true;
+	const allowedWorktreesDir = safeRealpath(
+		options.worktreesDir ? resolve(options.worktreesDir) : getDefaultWorktreesDir(),
+	);
+	const resolvedWorktreePath = safeRealpath(worktreePath);
+	if (!isPathInsideDir(resolvedWorktreePath, allowedWorktreesDir)) {
+		throw new Error(
+			`Refusing to remove worktree "${worktreePath}" outside managed worktrees directory "${allowedWorktreesDir}".`,
+		);
+	}
+	if (options.branch !== undefined && !isManagedWorktreeBranch(options.branch)) {
+		throw new Error(`Refusing to operate on unmanaged worktree branch "${options.branch}".`);
+	}
+	if (options.baseCommit !== undefined) {
+		assertValidBaseCommit(options.baseCommit);
+	}
 
+	const force = options.force === true;
 	let removedWorktree: string | undefined;
 
 	if (existsSync(worktreePath)) {
@@ -214,41 +257,22 @@ export async function removeWorktree(options: {
 			);
 		}
 		const removeArgs = force
-			? ["worktree", "remove", "--force", worktreePath]
-			: ["worktree", "remove", worktreePath];
+			? ["worktree", "remove", "--force", "--", worktreePath]
+			: ["worktree", "remove", "--", worktreePath];
 		await runGit(repoRoot, removeArgs);
 		removedWorktree = worktreePath;
-	} else {
-		try {
-			await runGit(repoRoot, ["worktree", "prune"]);
-		} catch {
-			// Ignore prune errors if repoRoot is unavailable or already clean.
-		}
 	}
 
 	let deletedBranch: string | undefined;
 	let preservedBranch: string | undefined;
 
 	if (options.branch && (await gitRefExists(repoRoot, `refs/heads/${options.branch}`))) {
-		let commitsAhead = 1;
-		if (options.baseCommit) {
-			try {
-				const countRes = await runGit(repoRoot, [
-					"rev-list",
-					"--count",
-					`${options.baseCommit}..${options.branch}`,
-				]);
-				const parsed = Number.parseInt(countRes.stdout.trim(), 10);
-				if (Number.isFinite(parsed) && parsed >= 0) {
-					commitsAhead = parsed;
-				}
-			} catch {
-				commitsAhead = 1;
-			}
-		}
+		const commitsAhead = options.baseCommit
+			? await countCommitsBetween(repoRoot, options.baseCommit, options.branch, 1)
+			: 1;
 
 		if (options.deleteBranch === true || (options.baseCommit !== undefined && commitsAhead === 0)) {
-			await runGit(repoRoot, ["branch", "-D", options.branch]);
+			await runGit(repoRoot, ["branch", "-D", "--", options.branch]);
 			deletedBranch = options.branch;
 		} else {
 			preservedBranch = options.branch;

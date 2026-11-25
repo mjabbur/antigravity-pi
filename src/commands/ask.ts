@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { formatPromptWithFiles, loadAttachedFiles } from "../files.js";
 import { ProgressLogger } from "../progress.js";
-import { CliAbortError, initPiRuntime, resolveTargetModel } from "../runtime.js";
+import { CliAbortError, initPiRuntime, type PiRuntime, resolveTargetModel } from "../runtime.js";
 import { openOrCreateSession } from "../sessions.js";
 import type { AskResult, ThinkingLevel } from "../types.js";
 
@@ -75,134 +75,142 @@ export async function runAskCommand(
 
 	let modelRuntime = deps.modelRuntime;
 	let settingsManager = deps.settingsManager;
+	let createdRuntime: PiRuntime | undefined;
 	if (!modelRuntime || !settingsManager) {
-		const runtime = await initPiRuntime({ cwd, agentDir: deps.agentDir });
-		modelRuntime ??= runtime.modelRuntime;
-		settingsManager ??= runtime.settingsManager;
+		createdRuntime = await initPiRuntime({ cwd, agentDir: deps.agentDir });
+		modelRuntime ??= createdRuntime.modelRuntime;
+		settingsManager ??= createdRuntime.settingsManager;
 	}
 
-	const sessionManager =
-		deps.sessionManager ??
-		openOrCreateSession({
-			cwd,
-			sessionId: options.sessionId,
-			noSession: options.noSession,
-			sessionDir: deps.sessionDir,
+	try {
+		const sessionManager =
+			deps.sessionManager ??
+			openOrCreateSession({
+				cwd,
+				sessionId: options.sessionId,
+				noSession: options.noSession,
+				sessionDir: deps.sessionDir,
+			});
+
+		const sessionContext = sessionManager.buildSessionContext();
+		const { model, thinkingLevel, warning } = await resolveTargetModel({
+			modelRuntime,
+			settingsManager,
+			modelSpec: options.model,
+			thinking: options.thinking,
+			defaultThinking: "off",
+			fallbackSessionModel: sessionContext.model,
+		});
+		if (warning) {
+			progress.log(`warning: ${warning}`);
+		}
+
+		const historyMessages = convertToLlm(sessionContext.messages);
+		const userMessage: UserMessage = {
+			role: "user",
+			content: fullPrompt,
+			timestamp: Date.now(),
+		};
+
+		const context: Context = {
+			...(options.system ? { systemPrompt: options.system } : {}),
+			messages: [...historyMessages, userMessage],
+		};
+
+		progress.log(`ask ${model.provider}/${model.id} (thinking=${thinkingLevel})`);
+		deps.signal?.throwIfAborted();
+
+		const stream = modelRuntime.streamSimple(model, context, {
+			reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+			signal: deps.signal,
+			sessionId: options.noSession ? undefined : sessionManager.getSessionId(),
 		});
 
-	const sessionContext = sessionManager.buildSessionContext();
-	const { model, thinkingLevel, warning } = await resolveTargetModel({
-		modelRuntime,
-		settingsManager,
-		modelSpec: options.model,
-		thinking: options.thinking,
-		defaultThinking: "off",
-		fallbackSessionModel: sessionContext.model,
-	});
-	if (warning) {
-		progress.log(`warning: ${warning}`);
-	}
+		let finalMessage: AssistantMessage | undefined;
+		let thinkingChars = 0;
+		let textChars = 0;
 
-	const historyMessages = convertToLlm(sessionContext.messages);
-	const userMessage: UserMessage = {
-		role: "user",
-		content: fullPrompt,
-		timestamp: Date.now(),
-	};
+		for await (const event of stream) {
+			switch (event.type) {
+				case "thinking_start":
+					progress.log("thinking...");
+					break;
+				case "thinking_delta":
+					thinkingChars += event.delta.length;
+					progress.logThrottled(`thinking (${thinkingChars} chars)`);
+					break;
+				case "text_start":
+					progress.log("streaming response...");
+					break;
+				case "text_delta":
+					textChars += event.delta.length;
+					progress.logThrottled(`streaming (${textChars} chars)`);
+					break;
+				case "done":
+					finalMessage = event.message;
+					break;
+				case "error":
+					finalMessage = event.error;
+					break;
+			}
+		}
 
-	const context: Context = {
-		...(options.system ? { systemPrompt: options.system } : {}),
-		messages: [...historyMessages, userMessage],
-	};
+		if (!finalMessage) {
+			throw new Error("Model stream ended without a final assistant message.");
+		}
+		if (finalMessage.stopReason === "aborted") {
+			throw new CliAbortError(finalMessage.errorMessage || "Request aborted");
+		}
+		if (finalMessage.stopReason === "error") {
+			throw new Error(finalMessage.errorMessage || "Model request failed.");
+		}
 
-	progress.log(`ask ${model.provider}/${model.id} (thinking=${thinkingLevel})`);
+		if (!options.noSession) {
+			if (
+				!sessionContext.model ||
+				sessionContext.model.provider !== model.provider ||
+				sessionContext.model.modelId !== model.id
+			) {
+				sessionManager.appendModelChange(model.provider, model.id);
+			}
+			if (sessionContext.thinkingLevel !== thinkingLevel) {
+				sessionManager.appendThinkingLevelChange(thinkingLevel);
+			}
+			sessionManager.appendMessage(userMessage);
+			sessionManager.appendMessage(finalMessage);
+		}
 
-	const stream = modelRuntime.streamSimple(model, context, {
-		reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
-		signal: deps.signal,
-		sessionId: options.noSession ? undefined : sessionManager.getSessionId(),
-	});
+		const text = extractText(finalMessage);
+		const thinking = extractThinking(finalMessage);
 
-	let finalMessage: AssistantMessage | undefined;
-	let thinkingChars = 0;
-	let textChars = 0;
+		progress.log("done");
 
-	for await (const event of stream) {
-		switch (event.type) {
-			case "thinking_start":
-				progress.log("thinking...");
-				break;
-			case "thinking_delta":
-				thinkingChars += event.delta.length;
-				progress.logThrottled(`thinking (${thinkingChars} chars)`);
-				break;
-			case "text_start":
-				progress.log("streaming response...");
-				break;
-			case "text_delta":
-				textChars += event.delta.length;
-				progress.logThrottled(`streaming (${textChars} chars)`);
-				break;
-			case "done":
-				finalMessage = event.message;
-				break;
-			case "error":
-				finalMessage = event.error;
-				break;
+		return {
+			text,
+			...(thinking ? { thinking } : {}),
+			...(options.noSession
+				? {}
+				: {
+						sessionId: sessionManager.getSessionId(),
+						sessionFile: sessionManager.getSessionFile(),
+				  }),
+			provider: model.provider,
+			model: model.id,
+			thinkingLevel,
+			stopReason: finalMessage.stopReason,
+			usage: {
+				input: finalMessage.usage.input,
+				output: finalMessage.usage.output,
+				cacheRead: finalMessage.usage.cacheRead,
+				cacheWrite: finalMessage.usage.cacheWrite,
+				total: finalMessage.usage.totalTokens,
+				cost: finalMessage.usage.cost.total,
+			},
+			durationMs: Date.now() - startedAt,
+		};
+	} finally {
+		if (createdRuntime) {
+			await createdRuntime.modelRuntime.settleCredentialWrites();
 		}
 	}
-
-	if (!finalMessage) {
-		throw new Error("Model stream ended without a final assistant message.");
-	}
-	if (finalMessage.stopReason === "aborted") {
-		throw new CliAbortError(finalMessage.errorMessage || "Request aborted");
-	}
-	if (finalMessage.stopReason === "error") {
-		throw new Error(finalMessage.errorMessage || "Model request failed.");
-	}
-
-	if (!options.noSession) {
-		if (
-			!sessionContext.model ||
-			sessionContext.model.provider !== model.provider ||
-			sessionContext.model.modelId !== model.id
-		) {
-			sessionManager.appendModelChange(model.provider, model.id);
-		}
-		if (sessionContext.thinkingLevel !== thinkingLevel) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
-		sessionManager.appendMessage(userMessage);
-		sessionManager.appendMessage(finalMessage);
-	}
-
-	const text = extractText(finalMessage);
-	const thinking = extractThinking(finalMessage);
-
-	progress.log("done");
-
-	return {
-		text,
-		...(thinking ? { thinking } : {}),
-		...(options.noSession
-			? {}
-			: {
-					sessionId: sessionManager.getSessionId(),
-					sessionFile: sessionManager.getSessionFile(),
-			  }),
-		provider: model.provider,
-		model: model.id,
-		thinkingLevel,
-		stopReason: finalMessage.stopReason,
-		usage: {
-			input: finalMessage.usage.input,
-			output: finalMessage.usage.output,
-			cacheRead: finalMessage.usage.cacheRead,
-			cacheWrite: finalMessage.usage.cacheWrite,
-			total: finalMessage.usage.totalTokens,
-			cost: finalMessage.usage.cost.total,
-		},
-		durationMs: Date.now() - startedAt,
-	};
 }

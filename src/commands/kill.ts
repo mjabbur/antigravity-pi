@@ -3,6 +3,7 @@ import {
 	isProcessAlive,
 	listSubagents,
 	resolveSubagent,
+	verifyProcessIdentity,
 } from "../subagents.js";
 import type { KillSubagentResult, SubagentRecord } from "../types.js";
 import { removeWorktree } from "../worktree.js";
@@ -17,6 +18,7 @@ export interface KillCommandOptions {
 
 export interface KillCommandDeps {
 	subagentsDir?: string;
+	worktreesDir?: string;
 }
 
 const SIGTERM_WAIT_MS = 2000;
@@ -42,7 +44,11 @@ async function stopLiveProcess(
 	record: SubagentRecord,
 	force: boolean,
 ): Promise<number | undefined> {
-	if (record.status !== "running" || record.pid === undefined || !isProcessAlive(record.pid)) {
+	if (
+		record.status !== "running" ||
+		record.pid === undefined ||
+		!verifyProcessIdentity(record.pid, record.pidStartTime)
+	) {
 		return undefined;
 	}
 
@@ -77,7 +83,12 @@ async function stopLiveProcess(
 		throw error;
 	}
 
-	await waitForExit(pid, SIGKILL_WAIT_MS);
+	const exited = await waitForExit(pid, SIGKILL_WAIT_MS);
+	if (!exited) {
+		throw new Error(
+			`Subagent "${record.name}" (${record.id}, pid=${pid}) did not exit after SIGKILL.`,
+		);
+	}
 	return pid;
 }
 
@@ -110,6 +121,7 @@ export async function runKillCommand(
 				baseCommit: record.worktree.baseCommit,
 				force: options.force,
 				deleteBranch: options.deleteBranch,
+				worktreesDir: deps.worktreesDir,
 			});
 		}
 
